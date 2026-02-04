@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdi-nomad-rheed"
+version = "0.1.0"
+description = "RHEED plugin for PDI Berlin"
+readme = "README.md"
+authors = [{ name = "Glaide Data", email = "info@glaidedata.com" }]
+license = { text = "MIT" }
+dependencies = [
+    "nomad-lab",
+    "pillow",   # For reading PGM/TIFF
+    "plotly",   # For the heatmap visualization
+    "numpy"
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.entry-points."nomad.plugin"]
+rheed_schema = "pdi_nomad_rheed.schema_packages:rheed_schema_entry_point"
+rheed_parser = "pdi_nomad_rheed.parsers:rheed_parser_entry_point"
