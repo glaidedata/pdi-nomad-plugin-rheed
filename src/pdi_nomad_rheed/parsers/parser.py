@@ -29,7 +29,7 @@ class RHEEDParser(MatchingParser):
         # Branch Logic based on file type
         try:
             if filename.lower().endswith('.pgm'):
-                self.parse_pgm(mainfile, entry, filename)
+                self.parse_pgm(mainfile, entry, filename, logger)
             elif filename.lower().endswith(('.tiff', '.tif')):
                 self.parse_tiff(mainfile, entry, filename)
                 
@@ -53,13 +53,13 @@ class RHEEDParser(MatchingParser):
         except Exception:
             pass
 
-    def parse_pgm(self, mainfile, entry, filename):
+    def parse_pgm(self, mainfile, entry, filename, logger):
         """
         PGM Logic: Raw intensity data -> Heatmap with Scale Bar
         """
-        with Image.open(mainfile) as img:
-            img_array = np.array(img)
-            
+        img_array = self._read_pgm_robustly(mainfile, logger)
+
+        if img_array is not None:
             fig = go.Figure(data=go.Heatmap(
                 z=img_array,
                 colorscale='Viridis',
@@ -73,7 +73,11 @@ class RHEEDParser(MatchingParser):
                 autosize=False,
                 width=700,
                 height=600,
-                yaxis=dict(scaleanchor="x", scaleratio=1, autorange="reversed")
+                yaxis=dict(
+                    scaleanchor="x",
+                    scaleratio=1,
+                    autorange="reversed"
+                )
             )
 
             entry.figures.append(PlotlyFigure(
@@ -81,6 +85,41 @@ class RHEEDParser(MatchingParser):
                 figure=fig.to_plotly_json()
             ))
 
+    def _read_pgm_robustly(self, filepath, logger):
+        """
+        Tries to read PGM using PIL. If that fails (due to value > maxval),
+        falls back to manual text parsing for P2 (ASCII) files.
+        """
+        # Method 1: Try Standard PIL
+        try:
+            with Image.open(filepath) as img:
+                if img.mode.startswith('I;16'):
+                    img = img.convert('I')
+                return np.array(img)
+        # Method 2: Fallback for P2 files (SAFIRE output)
+        # The test file claims maxval=16383 but contains 47934. 
+        # PIL rejects this. ---> We parse it manually.
+        except Exception as e:
+            try:
+                with open(filepath, 'r', encoding='latin-1') as f:
+                    header_peek = f.read(50)
+                    if not header_peek.strip().startswith('P2'):
+                        raise e
+
+                    f.seek(0)
+                    content = f.read()
+                    content = re.sub(r'#.*', '', content)
+                    tokens = content.split()
+                    width = int(tokens[1])
+                    height = int(tokens[2])
+                    
+                    data = np.array(tokens[4:], dtype=np.int32)
+                    return data.reshape((height, width))
+                    
+            except Exception as manual_error:
+                logger.error(f"Manual PGM read also failed: {manual_error}")
+                raise e
+    
     def parse_tiff(self, mainfile, entry, filename):
         """
         TIFF Logic: Visual snapshot -> Standard Image Plot
