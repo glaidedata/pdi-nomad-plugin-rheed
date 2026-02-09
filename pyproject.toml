@@ -129,9 +129,8 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [project.entry-points.'nomad.plugin']
-parser_entry_point = "pdi_nomad_plugin_rheed.parsers:parser_entry_point"
-schema_package_entry_point = "pdi_nomad_plugin_rheed.schema_packages:schema_package_entry_point"
-
+rheed_schema = "pdi_nomad_plugin_rheed.schema_packages:rheed_schema_entry_point"
+rheed_parser = "pdi_nomad_plugin_rheed.parsers:rheed_parser_entry_point"
 
 
 

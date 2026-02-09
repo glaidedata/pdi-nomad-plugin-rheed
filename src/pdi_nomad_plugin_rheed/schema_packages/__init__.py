@@ -2,7 +2,7 @@ from nomad.config.models.plugins import SchemaPackageEntryPoint
 from pydantic import Field
 
 
-class NewSchemaPackageEntryPoint(SchemaPackageEntryPoint):
+class RHEEDSchemaEntryPoint(SchemaPackageEntryPoint):
     parameter: int = Field(0, description='Custom configuration parameter')
 
     def load(self):
@@ -11,7 +11,7 @@ class NewSchemaPackageEntryPoint(SchemaPackageEntryPoint):
         return m_package
 
 
-schema_package_entry_point = NewSchemaPackageEntryPoint(
-    name='NewSchemaPackage',
-    description='New schema package entry point configuration.',
+rheed_schema_entry_point = RHEEDSchemaEntryPoint(
+    name='RHEEDSchema',
+    description='Schema for PDI RHEED images and scans',
 )
