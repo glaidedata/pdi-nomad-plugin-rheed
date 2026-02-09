@@ -1,6 +1,7 @@
 import os
 import logging
 import re
+import pandas as pd
 import numpy as np
 from PIL import Image
 import plotly.graph_objs as go
@@ -9,47 +10,60 @@ from nomad.datamodel import EntryArchive
 from nomad.parsing import MatchingParser
 from nomad.datamodel.metainfo.plot import PlotlyFigure
 
-from pdi_nomad_rheed.schema_packages.schema import RHEEDImage
+from pdi_nomad_rheed.schema_packages.schema import RHEEDImage, RHEEDPointScan, RHEEDSensor
 
 class RHEEDParser(MatchingParser):
     def parse(self, mainfile: str, archive: EntryArchive, logger=None):
         if logger is None:
             logger = logging.getLogger(__name__)
 
-        # Initialize the Entry
-        entry = RHEEDImage()
-        archive.data = entry
-
         filename = os.path.basename(mainfile)
-        entry.image_file = filename
+        
+        # 1. Image Files (PGM/TIFF) -> RHEEDImage
+        if filename.lower().endswith(('.pgm', '.tiff', '.tif')):
+            entry = RHEEDImage()
+            archive.data = entry
+            entry.image_file = filename
+            self._extract_timestamp_filename(filename, entry)
+            
+            try:
+                if filename.lower().endswith('.pgm'):
+                    self.parse_pgm(mainfile, entry, filename, logger)
+                elif filename.lower().endswith(('.tiff', '.tif')):
+                    self.parse_tiff(mainfile, entry, filename)
+            except Exception as e:
+                logger.error(f"Failed to parse image: {e}")
 
-        # Extract Metadata (Timestamp)
-        self._extract_timestamp(filename, entry)
+        # 2. Scan Files (CSV/ASC) -> RHEEDPointScan
+        elif filename.lower().endswith(('.csv', '.asc')):
+            entry = RHEEDPointScan()
+            archive.data = entry
+            entry.data_file = filename
+            
+            try:
+                self.parse_scan(mainfile, entry, filename, logger)
+            except Exception as e:
+                logger.error(f"Failed to parse scan: {e}")
 
-        # Branch Logic based on file type
-        try:
-            if filename.lower().endswith('.pgm'):
-                self.parse_pgm(mainfile, entry, filename, logger)
-            elif filename.lower().endswith(('.tiff', '.tif')):
-                self.parse_tiff(mainfile, entry, filename)
-                
-        except Exception as e:
-            logger.error(f"Failed to parse image file {filename}: {e}")
-
-    def _extract_timestamp(self, filename: str, entry: RHEEDImage):
+    def _extract_timestamp_filename(self, filename: str, entry: RHEEDImage):
         """
         Extracts timestamp from filename based on PDI conventions.
         Format: image_YYYY-MM-DD___HH-MM-SS.mmm.tif
         """
         try:
-            if "___" in filename:
-                ts_part = filename.split("___")[-1]
-                ts_clean = ts_part.rsplit('.', 1)[0]
-                entry.timestamp = ts_clean
+            clean_name = filename.rsplit('.', 1)[0]
+
+            if clean_name.startswith("image_"):
+                clean_name = clean_name.replace("image_", "")
+
+            if "___" in clean_name:
+                parts = clean_name.split("___")
+                date_part = parts[0]
+                time_part = parts[1]
+                time_part = time_part.replace("-", ":")
+                entry.timestamp = f"{date_part} {time_part}"
             else:
-                match = re.search(r'(\d{4}-\d{2}-\d{2}.*\d{2}-\d{2}-\d{2})', filename)
-                if match:
-                    entry.timestamp = match.group(1)
+                entry.timestamp = clean_name
         except Exception:
             pass
 
@@ -151,3 +165,76 @@ class RHEEDParser(MatchingParser):
                 figure=fig.to_plotly_json()
             ))
 
+    def parse_scan(self, mainfile, entry, filename, logger):
+        """
+        Parses PDI 'Point Scan' files (space-separated, specific header).
+        """
+        # 1. Extract Timestamp from Line 1 ("Recorded at ...")
+        with open(mainfile, 'r') as f:
+            first_line = f.readline().strip()
+            if "Recorded at" in first_line:
+                entry.timestamp = first_line.replace("Recorded at", "").strip()
+
+        # 2. Read Data Table
+        # The file is space-separated. 
+        # Line 2 has headers. Line 3 has weird values (maybe sensor ids?). Line 4 is empty. 
+        try:
+            # The structure is always: Time | Sensor1 | Sensor2 ...
+            df = pd.read_csv(mainfile, skiprows=4, header=None, sep=r'\s+')
+            
+            if df.empty:
+                logger.warning("Parsed dataframe is empty.")
+                return
+            
+            time_data = df.iloc[:, 0].values
+            sensor_data_block = df.iloc[:, 1:]
+
+  
+            fig = go.Figure()
+
+            for i, col_index in enumerate(sensor_data_block.columns):
+            
+                intensity = sensor_data_block[col_index].values
+                
+                sensor_name = f"Sensor {i+1}"
+                
+                sensor = RHEEDSensor()
+                sensor.name = sensor_name
+                sensor.time = time_data
+                sensor.intensity = intensity
+                entry.sensors.append(sensor)
+
+                fig.add_trace(go.Scatter(
+                    x=time_data, 
+                    y=intensity, 
+                    mode='lines', 
+                    name=sensor_name
+                ))
+
+            fig.update_layout(
+                title=f"Point Scan: {filename}",
+                xaxis_title="Time [s]",
+                yaxis_title="Intensity",
+                template='plotly_white',
+
+                showlegend=True,
+                legend=dict(
+                    title="Sensors",
+                    yanchor="top",
+                    y=0.99,
+                    xanchor="left",
+                    x=0.01,
+                    bgcolor="rgba(255, 255, 255, 0.9)",
+                    bordercolor="Black",
+                    borderwidth=1
+                )
+            )
+
+            entry.figures.append(PlotlyFigure(
+                label='Scan Intensity',
+                figure=fig.to_plotly_json()
+            ))
+
+        except Exception as e:
+            logger.error(f"Pandas parsing failed: {e}")
+            raise e

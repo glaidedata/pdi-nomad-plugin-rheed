@@ -7,5 +7,5 @@ class RHEEDSchemaEntryPoint(SchemaPackageEntryPoint):
 
 rheed_schema_entry_point = RHEEDSchemaEntryPoint(
     name='RHEEDSchema',
-    description='Schema for PDI RHEED images',
+    description='Schema for PDI RHEED images and point scans',
 )
