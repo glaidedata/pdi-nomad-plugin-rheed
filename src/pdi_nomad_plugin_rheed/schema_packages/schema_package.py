@@ -1,38 +1,84 @@
-from typing import (
-    TYPE_CHECKING,
-)
+from typing import TYPE_CHECKING
+
+import numpy as np
 
 if TYPE_CHECKING:
-    from nomad.datamodel.datamodel import (
-        EntryArchive,
-    )
-    from structlog.stdlib import (
-        BoundLogger,
-    )
+    pass
 
-from nomad.config import config
-from nomad.datamodel.data import Schema
+from nomad.datamodel.data import EntryData, EntryDataCategory
 from nomad.datamodel.metainfo.annotations import ELNAnnotation, ELNComponentEnum
-from nomad.metainfo import Quantity, SchemaPackage
-
-configuration = config.get_plugin_entry_point(
-    'pdi_nomad_plugin_rheed.schema_packages:schema_package_entry_point'
-)
+from nomad.datamodel.metainfo.plot import PlotSection
+from nomad.metainfo import Quantity, SchemaPackage, Section, SubSection
 
 m_package = SchemaPackage()
 
 
-class NewSchemaPackage(Schema):
-    name = Quantity(
-        type=str, a_eln=ELNAnnotation(component=ELNComponentEnum.StringEditQuantity)
+class RHEEDImage(EntryData, PlotSection):
+    """
+    Schema for a single RHEED image (PGM or TIFF).
+    Contains full intensity information visualized as a heatmap.
+    """
+
+    m_def = Section(categories=[EntryDataCategory])
+
+    image_file = Quantity(
+        type=str,
+        description='The original RHEED image file.',
+        a_eln=ELNAnnotation(component=ELNComponentEnum.FileEditQuantity),
+        a_browser=dict(adaptor='RawFileAdaptor'),
     )
-    message = Quantity(type=str)
 
-    def normalize(self, archive: 'EntryArchive', logger: 'BoundLogger') -> None:
-        super().normalize(archive, logger)
+    timestamp = Quantity(
+        type=str,
+        description='Timestamp extracted from the filename or file metadata.',
+        a_eln=ELNAnnotation(component=ELNComponentEnum.StringEditQuantity),
+    )
 
-        logger.info('NewSchema.normalize', parameter=configuration.parameter)
-        self.message = f'Hello {self.name}!'
+
+class RHEEDSensor(Section):
+    """
+    Data for a single sensor in a point scan.
+    """
+
+    name = Quantity(type=str, description='Name or ID of the sensor (e.g. Sensor 1).')
+
+    time = Quantity(
+        type=np.float64,
+        shape=['*'],
+        unit='s',
+        description='Time vector for this sensor.',
+    )
+
+    intensity = Quantity(
+        type=np.float64, shape=['*'], description='Averaged intensity values.'
+    )
+
+
+class RHEEDPointScan(EntryData, PlotSection):
+    """
+    Entry for a RHEED Point Scan (exported as .asc or .csv).
+    """
+
+    m_def = Section(categories=[EntryDataCategory])
+
+    data_file = Quantity(
+        type=str,
+        description='The source .asc or .csv file.',
+        a_eln=ELNAnnotation(component=ELNComponentEnum.FileEditQuantity),
+        a_browser=dict(adaptor='RawFileAdaptor'),
+    )
+
+    timestamp = Quantity(
+        type=str,
+        description='Timestamp extracted from the file header.',
+        a_eln=ELNAnnotation(component=ELNComponentEnum.StringEditQuantity),
+    )
+
+    sensors = SubSection(
+        section_def=RHEEDSensor,
+        repeats=True,
+        description='List of sensors extracted from the file.',
+    )
 
 
 m_package.__init_metainfo__()
