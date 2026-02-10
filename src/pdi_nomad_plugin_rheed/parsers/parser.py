@@ -16,10 +16,14 @@ from nomad.datamodel.metainfo.plot import PlotlyFigure
 from nomad.parsing import MatchingParser
 
 from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
+    ELNRHEEDMeasurement,
+    RawFileRHEEDData,
     RHEEDImage,
+    RHEEDPlot,
     RHEEDPointScan,
     RHEEDSensor,
 )
+from pdi_nomad_plugin_rheed.utils import create_archive
 
 
 class RHEEDParser(MatchingParser):
@@ -36,31 +40,51 @@ class RHEEDParser(MatchingParser):
 
         filename = os.path.basename(mainfile)
 
-        # 1. Image Files (PGM/TIFF) -> RHEEDImage
+        # 1. Prepare the ELN Entry
+        eln_entry = ELNRHEEDMeasurement()
+        eln_entry.name = filename
+
+        # 2. Parse Data into the ELN Entry
+        is_valid_parse = False
+
+        # --- Image Logic ---
         if filename.lower().endswith(('.pgm', '.tiff', '.tif')):
-            entry = RHEEDImage()
-            archive.data = entry
-            entry.image_file = filename
-            self._extract_timestamp_filename(filename, entry)
+            image_section = RHEEDImage()
+            image_section.image_file = filename
+            self._extract_timestamp_filename(filename, image_section)
 
             try:
                 if filename.lower().endswith('.pgm'):
-                    self.parse_pgm(mainfile, entry, filename, logger)
+                    self.parse_pgm(mainfile, image_section, filename, logger)
                 elif filename.lower().endswith(('.tiff', '.tif')):
-                    self.parse_tiff(mainfile, entry, filename)
+                    self.parse_tiff(mainfile, image_section, filename)
+
+                eln_entry.image = image_section
+                is_valid_parse = True
             except Exception as e:
                 logger.error(f'Failed to parse image: {e}')
 
-        # 2. Scan Files (CSV/ASC) -> RHEEDPointScan
+        # --- Scan Logic ---
         elif filename.lower().endswith(('.csv', '.asc')):
-            entry = RHEEDPointScan()
-            archive.data = entry
-            entry.data_file = filename
+            scan_section = RHEEDPointScan()
+            scan_section.data_file = filename
 
             try:
-                self.parse_scan(mainfile, entry, filename, logger)
+                self.parse_scan(mainfile, scan_section, filename, logger)
+                eln_entry.point_scan = scan_section
+                is_valid_parse = True
             except Exception as e:
                 logger.error(f'Failed to parse scan: {e}')
+
+        if not is_valid_parse:
+            return
+
+        # 3. Create the Separate ELN Archive
+        archive_name = f'{filename}.archive.json'
+        eln_reference = create_archive(eln_entry, archive, archive_name)
+
+        # 4. Link the Current Entry to the New ELN Entry
+        archive.data = RawFileRHEEDData(measurement=eln_reference)
 
     def _extract_timestamp_filename(self, filename: str, entry):
         """
@@ -109,7 +133,8 @@ class RHEEDParser(MatchingParser):
                 yaxis=dict(scaleanchor='x', scaleratio=1, autorange='reversed'),
             )
 
-            entry.figures.append(
+            entry.plot = RHEEDPlot()
+            entry.plot.figures.append(
                 PlotlyFigure(label='Intensity Map', figure=fig.to_plotly_json())
             )
 
@@ -177,7 +202,8 @@ class RHEEDParser(MatchingParser):
                 ),
             )
 
-            entry.figures.append(
+            entry.plot = RHEEDPlot()
+            entry.plot.figures.append(
                 PlotlyFigure(label='Snapshot', figure=fig.to_plotly_json())
             )
 
@@ -238,7 +264,8 @@ class RHEEDParser(MatchingParser):
                 ),
             )
 
-            entry.figures.append(
+            entry.plot = RHEEDPlot()
+            entry.plot.figures.append(
                 PlotlyFigure(label='Scan Intensity', figure=fig.to_plotly_json())
             )
 
