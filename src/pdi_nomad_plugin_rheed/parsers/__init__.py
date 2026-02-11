@@ -1,18 +1,16 @@
 from nomad.config.models.plugins import ParserEntryPoint
-from pydantic import Field
 
 
-class NewParserEntryPoint(ParserEntryPoint):
-    parameter: int = Field(0, description='Custom configuration parameter')
-
+class RHEEDParserEntryPoint(ParserEntryPoint):
     def load(self):
-        from pdi_nomad_plugin_rheed.parsers.parser import NewParser
+        from pdi_nomad_plugin_rheed.parsers.parser import RHEEDParser
 
-        return NewParser(**self.model_dump())
+        return RHEEDParser(**self.model_dump())
 
 
-parser_entry_point = NewParserEntryPoint(
-    name='NewParser',
-    description='New parser entry point configuration.',
-    mainfile_name_re=r'.*\.newmainfilename',
+rheed_parser_entry_point = RHEEDParserEntryPoint(
+    name='RHEEDParser',
+    description='Parser for PDI RHEED images and Scans',
+    mainfile_name_re=r'.*\.(pgm|tiff|tif|PGM|TIFF|TIF|asc|csv)$',
+    level=1,
 )
