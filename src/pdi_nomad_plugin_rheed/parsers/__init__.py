@@ -10,7 +10,8 @@ class RHEEDParserEntryPoint(ParserEntryPoint):
 
 rheed_parser_entry_point = RHEEDParserEntryPoint(
     name='RHEEDParser',
-    description='Parser for PDI RHEED images and Scans',
-    mainfile_name_re=r'.*\.(pgm|tiff|tif|PGM|TIFF|TIF|asc|csv)$',
+    description='Parser for PDI RHEED measurements. Triggered by a .rheed_metadata file.',
+    # CRITICAL CHANGE: Only trigger on specific dummy file extension!
+    mainfile_name_re=r'.*\.rheed_metadata$',
     level=1,
 )

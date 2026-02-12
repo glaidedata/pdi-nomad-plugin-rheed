@@ -16,14 +16,13 @@ from nomad.datamodel.metainfo.plot import PlotlyFigure
 from nomad.parsing import MatchingParser
 
 from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
-    ELNRHEEDMeasurement,
-    RawFileRHEEDData,
-    RHEEDImage,
+    PointScan,
+    RHEEDImageResult,
+    RHEEDMeasurement,
     RHEEDPlot,
-    RHEEDPointScan,
+    RHEEDPointScanResult,
     RHEEDSensor,
 )
-from pdi_nomad_plugin_rheed.utils import create_archive
 
 
 class RHEEDParser(MatchingParser):
@@ -38,53 +37,66 @@ class RHEEDParser(MatchingParser):
         if logger is None:
             logger = logging.getLogger(__name__)
 
-        filename = os.path.basename(mainfile)
+        # 1. Prepare the single ELN Entry
+        measurement = RHEEDMeasurement()
+        measurement.name = 'RHEED Measurement Collection'
 
-        # 1. Prepare the ELN Entry
-        eln_entry = ELNRHEEDMeasurement()
-        eln_entry.name = filename
+        # 2. Look at the directory containing the dummy .rheed_metadata file
+        maindir = os.path.dirname(mainfile)
+        files_in_dir = os.listdir(maindir)
 
-        # 2. Parse Data into the ELN Entry
-        is_valid_parse = False
+        # 3. Process all Images in the folder
+        image_files = [
+            f for f in files_in_dir if f.lower().endswith(('.pgm', '.tiff', '.tif'))
+        ]
 
-        # --- Image Logic ---
-        if filename.lower().endswith(('.pgm', '.tiff', '.tif')):
-            image_section = RHEEDImage()
-            image_section.image_file = filename
-            self._extract_timestamp_filename(filename, image_section)
+        for img_filename in image_files:
+            img_path = os.path.join(maindir, img_filename)
 
-            try:
-                if filename.lower().endswith('.pgm'):
-                    self.parse_pgm(mainfile, image_section, filename, logger)
-                elif filename.lower().endswith(('.tiff', '.tif')):
-                    self.parse_tiff(mainfile, image_section, filename)
+            # Create the result item for this image
+            img_result = RHEEDImageResult()
+            img_result.result_type = 'image'
+            img_result.images = [img_filename]
 
-                eln_entry.image = image_section
-                is_valid_parse = True
-            except Exception as e:
-                logger.error(f'Failed to parse image: {e}')
-
-        # --- Scan Logic ---
-        elif filename.lower().endswith(('.csv', '.asc')):
-            scan_section = RHEEDPointScan()
-            scan_section.data_file = filename
+            self._extract_timestamp_filename(img_filename, img_result)
 
             try:
-                self.parse_scan(mainfile, scan_section, filename, logger)
-                eln_entry.point_scan = scan_section
-                is_valid_parse = True
+                if img_filename.lower().endswith('.pgm'):
+                    self.parse_pgm(img_path, img_result, img_filename, logger)
+                elif img_filename.lower().endswith(('.tiff', '.tif')):
+                    self.parse_tiff(img_path, img_result, img_filename)
+
+                # Append to the main container
+                measurement.results.append(img_result)
             except Exception as e:
-                logger.error(f'Failed to parse scan: {e}')
+                logger.error(f'Failed to parse image {img_filename}: {e}')
 
-        if not is_valid_parse:
-            return
+        # 4. Process all Point Scans in the folder
+        scan_files = [f for f in files_in_dir if f.lower().endswith(('.csv', '.asc'))]
 
-        # 3. Create the Separate ELN Archive
-        archive_name = f'{filename}.archive.json'
-        eln_reference = create_archive(eln_entry, archive, archive_name)
+        if scan_files:
+            # Group all point scans into ONE PointScanResult section
+            scan_result_collection = RHEEDPointScanResult()
+            scan_result_collection.result_type = 'scan_point'
 
-        # 4. Link the Current Entry to the New ELN Entry
-        archive.data = RawFileRHEEDData(measurement=eln_reference)
+            for scan_filename in scan_files:
+                scan_path = os.path.join(maindir, scan_filename)
+
+                # Create the individual scan item
+                pt_scan = PointScan()
+                pt_scan.source_file = scan_filename
+
+                try:
+                    self.parse_scan(scan_path, pt_scan, scan_filename, logger)
+                    scan_result_collection.point_scans.append(pt_scan)
+                except Exception as e:
+                    logger.error(f'Failed to parse scan {scan_filename}: {e}')
+
+            if scan_result_collection.point_scans:
+                measurement.results.append(scan_result_collection)
+
+        # 5. Save the final bundled entry directly to the archive!
+        archive.data = measurement
 
     def _extract_timestamp_filename(self, filename: str, entry):
         """
@@ -102,7 +114,7 @@ class RHEEDParser(MatchingParser):
                 date_part = parts[0]
                 time_part = parts[1]
                 time_part = time_part.replace('-', ':')
-                entry.timestamp = f'{date_part} {time_part}'
+                entry.timestamp = f'{date_part}T{time_part}Z'
             else:
                 entry.timestamp = clean_name
         except Exception:
@@ -211,11 +223,18 @@ class RHEEDParser(MatchingParser):
         """
         Parses PDI 'Point Scan' files (space-separated, specific header).
         """
-        # 1. Extract Timestamp from Line 1 ("Recorded at ...")
+        # 1. Extract Timestamp (starttiem?) from Line 1 ("Recorded at ...")
         with open(mainfile) as f:
             first_line = f.readline().strip()
             if 'Recorded at' in first_line:
-                entry.timestamp = first_line.replace('Recorded at', '').strip()
+                raw_time = first_line.replace('Recorded at', '').strip()
+                if raw_time:
+                    try:
+                        parts = raw_time.split()
+                        if len(parts) >= 2:
+                            entry.start_time = f"{parts[0]}T{parts[1]}Z"
+                    except Exception:
+                        logger.warning(f"Could not parse timestamp from: {raw_time}")
 
         # 2. Read Data Table
         try:
