@@ -3,54 +3,110 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from nomad.datamodel.datamodel import EntryArchive
-    from structlog.stdlib import BoundLogger
+    pass
 
-from nomad.datamodel.data import ArchiveSection, EntryData, EntryDataCategory
-from nomad.datamodel.metainfo.annotations import ELNAnnotation, ELNComponentEnum
+from nomad.datamodel.data import ArchiveSection, EntryData
+from nomad.datamodel.metainfo.annotations import (
+    ELNAnnotation,
+    ELNComponentEnum,
+    SectionProperties,
+)
+from nomad.datamodel.metainfo.basesections import (
+    CompositeSystemReference,
+    Measurement,
+    MeasurementResult,
+)
 from nomad.datamodel.metainfo.plot import PlotSection
-from nomad.datamodel.results import ELN, Results
-from nomad.metainfo import Quantity, SchemaPackage, Section, SubSection
+from nomad.metainfo import Datetime, MEnum, Quantity, SchemaPackage, Section, SubSection
 
 m_package = SchemaPackage()
 
-# --- Helper Section for Plots ---
 
-
+# ------ Plot Helper ------
 class RHEEDPlot(PlotSection):
-    """
-    Wrapper for plots to ensure they render correctly in the ELN overview.
-    """
+    """Wrapper for plots to ensure they render correctly in the ELN overview."""
 
     m_def = Section(a_eln=ELNAnnotation(overview=True, lane_width='800px'))
 
 
-# --- Data Sections ---
+# ------ Settings ------
+class RHEEDMeasurementSettings(ArchiveSection):
+    m_def = Section(label='Measurement Settings')
+    distance_sample_to_screen_mm = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    image_length_calibration_mm_per_px = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    electron_energy_keV = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    emission_current_uA = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    compensation_cage_on = Quantity(
+        type=bool, a_eln=dict(component=ELNComponentEnum.BoolEditQuantity)
+    )
+    beam_deflection_x = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    beam_deflection_y = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    beam_rocking = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    incidence_angle_deg = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
 
 
-class RHEEDImage(ArchiveSection):
-    """
-    Schema for a single RHEED image (PGM or TIFF).
-    """
+# ------  Results ------
+class RHEEDResult(MeasurementResult):
+    m_def = Section(label='RHEED Result')
+    result_type = Quantity(
+        type=MEnum('video', 'image', 'scan_point'),
+        a_eln=dict(component=ELNComponentEnum.EnumEditQuantity),
+    )
+    sample_azimuth_phi_deg = Quantity(
+        type=float,
+        description='User adds this manually, not derived from the video',
+        a_eln=dict(component=ELNComponentEnum.NumberEditQuantity),
+    )
+    sample_rotation_alpha_deg = Quantity(
+        type=float,
+        description='Manually measured or inserted by the user',
+        a_eln=dict(component=ELNComponentEnum.NumberEditQuantity),
+    )
+    notes = Quantity(
+        type=str, a_eln=dict(component=ELNComponentEnum.RichTextEditQuantity)
+    )
 
+
+class RHEEDVideoResult(RHEEDResult):
+    m_def = Section(label='Video Result')
+    video_link = Quantity(
+        type=str, a_eln=dict(component=ELNComponentEnum.URLEditQuantity)
+    )
+
+
+class RHEEDImageResult(RHEEDResult, PlotSection):
     m_def = Section(
-        label_quantity='image_file',
-        a_eln=ELNAnnotation(overview=True, lane_width='600px'),
+        label='Image Result', a_eln=ELNAnnotation(overview=True, lane_width='600px')
     )
-
-    image_file = Quantity(
+    images = Quantity(
         type=str,
-        description='The original RHEED image file.',
-        a_eln=ELNAnnotation(component=ELNComponentEnum.FileEditQuantity),
+        shape=['*'],
         a_browser=dict(adaptor='RawFileAdaptor'),
+        a_eln=dict(component=ELNComponentEnum.FileEditQuantity),
     )
-
+    derived_from_video_link = Quantity(
+        type=str, a_eln=dict(component=ELNComponentEnum.URLEditQuantity)
+    )
     timestamp = Quantity(
-        type=str,
-        description='Timestamp extracted from the filename or file metadata.',
-        a_eln=ELNAnnotation(component=ELNComponentEnum.StringEditQuantity),
+        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
     )
-
+    sample = SubSection(section_def=CompositeSystemReference)
     plot = SubSection(
         section_def=RHEEDPlot,
         description='Interactive plot of the image.',
@@ -58,45 +114,39 @@ class RHEEDImage(ArchiveSection):
     )
 
 
-class RHEEDSensor(Section):
-    """
-    Data for a single sensor in a point scan.
-    """
+class RHEEDSensor(ArchiveSection):
+    name = Quantity(type=str)
+    position_label = Quantity(
+        type=str, a_eln=dict(component=ELNComponentEnum.StringEditQuantity)
+    )
+    time = Quantity(type=np.float64, shape=['*'])
+    intensity = Quantity(type=np.float64, shape=['*'])
 
-    name = Quantity(type=str, description='Name or ID of the sensor.')
-    time = Quantity(type=np.float64, shape=['*'], unit='s', description='Time vector.')
-    intensity = Quantity(type=np.float64, shape=['*'], description='Intensity values.')
 
-
-class RHEEDPointScan(ArchiveSection):
-    """
-    Entry for a RHEED Point Scan (exported as .asc or .csv).
-    """
-
+class PointScan(PlotSection, ArchiveSection):
     m_def = Section(
-        label_quantity='data_file',
-        a_eln=ELNAnnotation(overview=True, lane_width='600px'),
+        label='Point Scan Data', a_eln=ELNAnnotation(overview=True, lane_width='600px')
     )
-
-    data_file = Quantity(
+    source_file = Quantity(
         type=str,
-        description='The source .asc or .csv file.',
-        a_eln=ELNAnnotation(component=ELNComponentEnum.FileEditQuantity),
         a_browser=dict(adaptor='RawFileAdaptor'),
+        a_eln=dict(component=ELNComponentEnum.FileEditQuantity),
     )
-
-    timestamp = Quantity(
+    start_time = Quantity(
+        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
+    )
+    end_time = Quantity(
+        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
+    )
+    sensor_position_overview_picture = Quantity(
         type=str,
-        description='Timestamp extracted from the file header.',
-        a_eln=ELNAnnotation(component=ELNComponentEnum.StringEditQuantity),
+        a_browser=dict(adaptor='RawFileAdaptor'),
+        a_eln=dict(component=ELNComponentEnum.FileEditQuantity),
     )
-
-    sensors = SubSection(
-        section_def=RHEEDSensor,
-        repeats=True,
-        description='List of sensors extracted from the file.',
+    derived_from_video_link = Quantity(
+        type=str, a_eln=dict(component=ELNComponentEnum.URLEditQuantity)
     )
-
+    sensors = SubSection(section_def=RHEEDSensor, repeats=True)
     plot = SubSection(
         section_def=RHEEDPlot,
         description='Interactive plot of the scan.',
@@ -104,99 +154,71 @@ class RHEEDPointScan(ArchiveSection):
     )
 
 
-# --- The ELN Entry (Editable) ---
+class RHEEDPointScanResult(RHEEDResult):
+    m_def = Section(label='Point Scan Result')
+    start_time = Quantity(
+        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
+    )
+    end_time = Quantity(
+        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
+    )
+    point_scans = SubSection(section_def=PointScan, repeats=True)
 
 
-class ELNRHEEDMeasurement(EntryData, ArchiveSection):
-    """
-    The Editable ELN Entry. This is what the user interacts with.
-    """
-
+# ------ Main Container ------
+class RHEEDMeasurement(Measurement, EntryData):
     m_def = Section(
-        categories=[EntryDataCategory],
         label='RHEED Measurement',
         a_eln=ELNAnnotation(
             overview=True,
             lane_width='800px',
+            properties=SectionProperties(
+                order=[
+                    'name',
+                    'measurement_id',
+                    'mbe_process_ref',
+                    'datetime_start',
+                    'datetime_end',
+                    'operator',
+                    'instruments',
+                    'sample',
+                ]
+            ),
         ),
-        a_template={
-            'measurement_identifiers': {},
-        },
     )
-
-    name = Quantity(
+    measurement_id = Quantity(
+        type=str, a_eln=dict(component=ELNComponentEnum.StringEditQuantity)
+    )
+    
+    # Future Improvement: 
+    # Right now, this is just a text string. 
+    # In the future, we will want to write logic that takes this string,
+    # searches the NOMAD database for an MBE experiment with that ID, and creates a real clickable link.
+    mbe_process_ref = Quantity(
         type=str,
-        description='Short name for this measurement.',
-        a_eln=ELNAnnotation(
-            component=ELNComponentEnum.StringEditQuantity, overview=True
-        ),
+        description='Growth run ID of the experiment',
+        a_eln=dict(component=ELNComponentEnum.StringEditQuantity),
     )
 
-    lab_id = Quantity(
+    datetime_start = Quantity(
+        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
+    )
+    datetime_end = Quantity(
+        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
+    )
+    operator = Quantity(
         type=str,
-        description='Sample or Lab ID.',
-        a_eln=ELNAnnotation(
-            component=ELNComponentEnum.StringEditQuantity, overview=True
-        ),
+        description='Optional (or rely on NOMAD authors)',
+        a_eln=dict(component=ELNComponentEnum.StringEditQuantity),
     )
 
-    description = Quantity(
-        type=str,
-        description='User comments.',
-        a_eln=ELNAnnotation(component=ELNComponentEnum.RichTextEditQuantity),
+    sample = SubSection(
+        section_def=CompositeSystemReference,
+        description='Reference to sample, default is the sample in the center of the sample holder',
     )
 
-    # We use SubSections to hold the actual data
-    # Allows for future expansion (e.g. 1 measurement = multiple images)
-    image = SubSection(
-        section_def=RHEEDImage,
-        description='RHEED Image Data',
-        a_eln=ELNAnnotation(overview=True),
-    )
-
-    point_scan = SubSection(
-        section_def=RHEEDPointScan,
-        description='RHEED Point Scan Data',
-        a_eln=ELNAnnotation(overview=True),
-    )
-
-    def normalize(self, archive: 'EntryArchive', logger: 'BoundLogger') -> None:
-        super().normalize(archive, logger)
-
-        # Populate standard NOMAD results for search
-        if not archive.results:
-            archive.results = Results(eln=ELN())
-        if not archive.results.eln:
-            archive.results.eln = ELN()
-
-        if self.name:
-            archive.results.eln.names = [self.name]
-
-        if self.lab_id:
-            archive.results.eln.lab_ids = [self.lab_id]
-
-
-# --- The Raw File Entry (The Pointer) ---
-
-
-class RawFileRHEEDData(EntryData):
-    """
-    The Parser creates this. It points to the ELN entry.
-    """
-
-    m_def = Section(
-        a_eln=ELNAnnotation(
-            overview=True, hide=['name', 'creation_time', 'last_processing_time']
-        )
-    )
-
-    measurement = Quantity(
-        type=ELNRHEEDMeasurement,
-        description='Link to the editable ELN entry.',
-        a_eln=ELNAnnotation(
-            component=ELNComponentEnum.ReferenceEditQuantity, label='Go to ELN Entry'
-        ),
-    )
+    measurement_settings = SubSection(section_def=RHEEDMeasurementSettings)
+    results = SubSection(section_def=RHEEDResult, repeats=True)
 
 
 m_package.__init_metainfo__()
