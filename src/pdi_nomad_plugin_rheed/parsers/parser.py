@@ -231,10 +231,11 @@ class RHEEDParser(MatchingParser):
                 if raw_time:
                     try:
                         parts = raw_time.split()
-                        if len(parts) >= 2:
-                            entry.start_time = f"{parts[0]}T{parts[1]}Z"
+                        MIN_TIMESTAMP_PARTS = 2
+                        if len(parts) >= MIN_TIMESTAMP_PARTS:
+                            entry.start_time = f'{parts[0]}T{parts[1]}Z'
                     except Exception:
-                        logger.warning(f"Could not parse timestamp from: {raw_time}")
+                        logger.warning(f'Could not parse timestamp from: {raw_time}')
 
         # 2. Read Data Table
         try:

@@ -189,9 +189,9 @@ class RHEEDMeasurement(Measurement, EntryData):
     measurement_id = Quantity(
         type=str, a_eln=dict(component=ELNComponentEnum.StringEditQuantity)
     )
-    
-    # Future Improvement: 
-    # Right now, this is just a text string. 
+
+    # Future Improvement:
+    # Right now, this is just a text string.
     # In the future, we will want to write logic that takes this string,
     # searches the NOMAD database for an MBE experiment with that ID, and creates a real clickable link.
     mbe_process_ref = Quantity(
