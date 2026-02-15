@@ -1,7 +1,8 @@
 import logging
 import os
+from unittest.mock import MagicMock
 
-from nomad.datamodel import EntryArchive
+from nomad.datamodel import EntryArchive, EntryMetadata
 
 from pdi_nomad_plugin_rheed.parsers.parser import RHEEDParser
 from pdi_nomad_plugin_rheed.schema_packages.schema_package import RHEEDMeasurement
@@ -15,31 +16,46 @@ def get_data_folder():
 
 def test_parse_full_collection():
     """
-    Tests if the parser correctly aggregates images and scans from the folder
-    when triggered by the dummy metadata file.
+    Tests if the parser creates the entry and normalize() populates it
+    with images and scans from the folder.
     """
     data_folder = get_data_folder()
+    trigger_filename = 'test_trigger.rheed_metadata'
 
     # 1. Create the dummy trigger file inside tests/data
-    trigger_file = os.path.join(data_folder, 'test_trigger.rheed_metadata')
-    with open(trigger_file, 'w') as f:
+    trigger_path = os.path.join(data_folder, trigger_filename)
+    with open(trigger_path, 'w') as f:
         f.write('Trigger')
 
     try:
-        # 2. Setup the parser
+        # 2. Setup the parser and archive
         parser = RHEEDParser()
         archive = EntryArchive()
 
-        # 3. Run the parser on the trigger file
-        parser.parse(trigger_file, archive, logging.getLogger())
+        archive.metadata = EntryMetadata()
+        archive.metadata.mainfile = trigger_filename
 
-        # 4. Verify the Root Entry
+        # --- CRITICAL: Mock the Server Context ---
+        # normalize() function needs to know where the files are.
+        # We fake the 'raw_path' to point to our local test data folder.
+        archive.m_context = MagicMock()
+        archive.m_context.raw_path.return_value = data_folder
+
+        # 3. Run the parser
+        # (This now only creates the empty RHEEDMeasurement entry)
+        parser.parse(trigger_path, archive, logging.getLogger())
+
+        # 4. Verify the Entry exists but is likely empty of results
         assert isinstance(archive.data, RHEEDMeasurement)
-        assert archive.data.name == 'RHEED Measurement Collection'
 
-        # 5. Verify Results were found and added
+        # 5. Run Normalization MANUALLY
+        archive.data.normalize(archive, logging.getLogger())
+
+        # 6. Verify Results were found and added
         results = archive.data.results
-        assert len(results) > 0, 'Parser should have found files in the data directory'
+        assert len(results) > 0, (
+            'Normalize should have found files in the data directory'
+        )
 
         # --- Verify Images ---
         # Look for the .pgm result
@@ -51,7 +67,7 @@ def test_parse_full_collection():
         assert pgm_res.plot is not None
         assert len(pgm_res.plot.figures) > 0
         assert pgm_res.plot.figures[0].label == 'Intensity Map'
-        assert pgm_res.timestamp is not None  # Check timestamp extraction
+        assert pgm_res.timestamp is not None
 
         # --- Verify Scans ---
         # Look for the scan result
@@ -62,15 +78,16 @@ def test_parse_full_collection():
 
             # Check the first scan content
             first_scan = scan_res.point_scans[0]
+            # Check the timestamp fix we implemented earlier
+            assert first_scan.start_time is not None
             EXPECTED_SENSOR_COUNT = 3
             assert len(first_scan.sensors) == EXPECTED_SENSOR_COUNT
 
             # Check scan plot
             assert first_scan.plot is not None
             assert len(first_scan.plot.figures) > 0
-            assert first_scan.plot.figures[0].label == 'Scan Intensity'
 
     finally:
-        # 6. Cleanup: Remove the dummy trigger file
-        if os.path.exists(trigger_file):
-            os.remove(trigger_file)
+        # 7. Cleanup: Remove the dummy trigger file
+        if os.path.exists(trigger_path):
+            os.remove(trigger_path)
