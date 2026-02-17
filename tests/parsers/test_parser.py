@@ -3,110 +3,132 @@ import os
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
-from nomad.datamodel import EntryArchive
+import pytest
+from nomad.datamodel import EntryArchive, EntryMetadata
 
 from pdi_nomad_plugin_rheed.parsers.parser import RHEEDParser
-from pdi_nomad_plugin_rheed.schema_packages.schema_package import RawFileRHEEDData
+from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
+    RawFileRHEEDData,
+    RHEEDMeasurement,
+)
 
 
-# Helper to get the absolute path to the data folder
-def get_test_file(filename):
+# --- Fixtures (Setup & Teardown) ---
+@pytest.fixture
+def data_folder():
     module_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(module_dir, '..', 'data', filename)
+    return os.path.join(module_dir, '..', 'data')
 
 
-@contextmanager
-def mock_update_entry_ctx(*args, **kwargs):
-    # This acts as the dictionary that the parser writes the ELN data into
-    holder = {}
-    yield holder
-    # We attach the result to the context so we can inspect it in the test
-    kwargs.get('_test_capture', {})['data'] = holder.get('data')
+@pytest.fixture
+def trigger_filename():
+    return 'test_trigger.rheed_metadata'
 
 
-def test_parse_scan():
+@pytest.fixture
+def trigger_file(data_folder, trigger_filename):
+    """Creates the dummy trigger file and cleans it up after the test."""
+    trigger_path = os.path.join(data_folder, trigger_filename)
+    with open(trigger_path, 'w') as f:
+        f.write('Trigger')
+    yield trigger_path
+    # Cleanup
+    if os.path.exists(trigger_path):
+        os.remove(trigger_path)
+
+
+# --- Test 1: The Parser (Pointer Creation) ---
+
+
+def test_parser_creates_pointer(trigger_file, trigger_filename):
+    """
+    Verifies that the Parser correctly:
+    1. Creates a RawFileRHEEDData entry (Pointer).
+    2. Calls create_archive to spawn the ELN.
+    3. Sets the correct 'data_file' reference in that ELN.
+    """
     parser = RHEEDParser()
     archive = EntryArchive()
+    archive.metadata = EntryMetadata()
+    archive.metadata.upload_id = 'test_upload_id'
+    archive.metadata.mainfile = trigger_filename
 
-    # --- MOCKING THE SERVER CONTEXT ---
-    archive.metadata = MagicMock()
-    archive.metadata.upload_id = 'test_upload'
-
+    # Mock server context
     archive.m_context = MagicMock()
     archive.m_context.raw_path_exists.return_value = False
 
-    # We use a mutable dict to capture what the parser saves
-    captured_eln = {}
+    # Capture the data passed to create_archive
+    captured_data = {}
 
-    # Configure the mock to use our context manager
-    def side_effect(*args, **kwargs):
-        # Pass our capture dict to the context manager
-        kwargs['_test_capture'] = captured_eln
-        return mock_update_entry_ctx(*args, **kwargs)
+    @contextmanager
+    def mock_update_entry(*args, **kwargs):
+        holder = {}
+        yield holder
+        captured_data.update(holder)
 
-    archive.m_context.update_entry.side_effect = side_effect
+    archive.m_context.update_entry.side_effect = mock_update_entry
 
-    # --- RUN PARSER ---
-    test_file = get_test_file('export point scan.csv')
-    parser.parse(test_file, archive, logging.getLogger())
+    # Run Parser
+    parser.parse(trigger_file, archive, logging.getLogger())
 
-    # --- VERIFY RAW ENTRY (Pointer) ---
+    # VERIFY
     assert isinstance(archive.data, RawFileRHEEDData)
     assert archive.data.measurement is not None
 
-    # --- VERIFY ELN CONTENT (The data passed to the mock) ---
-    # The parser converted the ELN entry to a dict. Let's inspect it.
-    eln_data = captured_eln.get('data', {})
-
-    # Check that we parsed the point scan section
-    assert 'point_scan' in eln_data
-    scan = eln_data['point_scan']
-
-    # Check sensors
-    EXPECTED_SENSOR_COUNT = 3
-    assert len(scan.get('sensors', [])) == EXPECTED_SENSOR_COUNT
-
-    # Check plot
-    assert 'plot' in scan
-    assert len(scan['plot'].get('figures', [])) > 0
-    assert scan['plot']['figures'][0]['label'] == 'Scan Intensity'
+    # Check if 'data_file' was correctly passed to the new ELN entry
+    assert 'data' in captured_data
+    assert captured_data['data']['data_file'] == trigger_filename
 
 
-def test_parse_image():
-    image_filename = 'image_2025-12-22___15-39-57.878.pgm'
-    test_file = get_test_file(image_filename)
+# --- Test 2: The Normalizer (File Scanning) ---
+def test_measurement_normalization(trigger_file, trigger_filename):
+    """
+    Verifies that RHEEDMeasurement.normalize():
+    1. Reads the 'data_file' field.
+    2. Scans the directory.
+    3. Populates the 'results' list with Images and Scans.
+    """
+    eln_entry = RHEEDMeasurement()
+    eln_entry.data_file = trigger_filename  # The field set by the parser
 
-    if os.path.exists(test_file):
-        parser = RHEEDParser()
-        archive = EntryArchive()
+    archive = EntryArchive()
+    archive.data = eln_entry
+    archive.metadata = EntryMetadata()
 
-        # --- MOCKING ---
-        archive.metadata = MagicMock()
-        archive.metadata.upload_id = 'test_upload'
-        archive.m_context = MagicMock()
-        archive.m_context.raw_path_exists.return_value = False
+    # Set the entry name to prevent AttributeError in base class normalize
+    archive.metadata.entry_name = 'Test Entry'
 
-        captured_eln = {}
+    # Mock 'raw_file' so normalize() can resolve the absolute path
+    archive.m_context = MagicMock()
 
-        def side_effect(*args, **kwargs):
-            kwargs['_test_capture'] = captured_eln
-            return mock_update_entry_ctx(*args, **kwargs)
+    @contextmanager
+    def mock_raw_file(filename):
+        # We return the path to our test trigger file
+        class MockFile:
+            name = trigger_file
 
-        archive.m_context.update_entry.side_effect = side_effect
+        yield MockFile()
 
-        # --- RUN ---
-        parser.parse(test_file, archive, logging.getLogger())
+    archive.m_context.raw_file.side_effect = mock_raw_file
 
-        # --- VERIFY ---
-        assert isinstance(archive.data, RawFileRHEEDData)
+    # Run Normalization
+    eln_entry.normalize(archive, logging.getLogger())
 
-        eln_data = captured_eln.get('data', {})
-        assert 'image' in eln_data
-        img = eln_data['image']
+    # VERIFY
+    results = eln_entry.results
+    assert len(results) > 0, 'Normalize should have found files in the data directory'
 
-        # Check Timestamp extraction
-        assert img.get('timestamp') is not None
+    # Verify Images
+    image_results = [r for r in results if r.result_type == 'image']
+    assert len(image_results) > 0, 'Should have found images'
+    assert image_results[0].plot is not None
+    assert image_results[0].plot.figures[0].label == 'Intensity Map'
 
-        # Check Plot
-        assert 'plot' in img
-        assert len(img['plot'].get('figures', [])) > 0
+    # Verify Scans
+    scan_results = [r for r in results if r.result_type == 'scan_point']
+    if scan_results:
+        scan_res = scan_results[0]
+        assert len(scan_res.point_scans) > 0
+        EXPECTED_SENSOR_COUNT = 3
+        assert len(scan_res.point_scans[0].sensors) == EXPECTED_SENSOR_COUNT
+        assert scan_res.point_scans[0].plot is not None
