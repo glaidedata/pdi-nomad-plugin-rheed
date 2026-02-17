@@ -192,10 +192,18 @@ class RHEEDMeasurement(Measurement, EntryData):
             ),
         ),
     )
+
+    data_file = Quantity(
+        type=str,
+        description='The dummy file that triggered this entry. Used to locate the data folder.',
+        a_eln=dict(component=ELNComponentEnum.FileEditQuantity),
+    )
+
     measurement_id = Quantity(
         type=str, a_eln=dict(component=ELNComponentEnum.StringEditQuantity)
     )
 
+    # TODO
     # Future Improvement:
     # Right now, this is just a text string.
     # In the future, we will want to write logic that takes this string,
@@ -212,9 +220,10 @@ class RHEEDMeasurement(Measurement, EntryData):
     datetime_end = Quantity(
         type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
     )
+    # TODO: Ask PDI if this should be a simple string or a User reference.
     operator = Quantity(
         type=str,
-        description='Optional (or rely on NOMAD authors)',
+        description='Name of the person who performed the measurement.',
         a_eln=dict(component=ELNComponentEnum.StringEditQuantity),
     )
 
@@ -233,21 +242,18 @@ class RHEEDMeasurement(Measurement, EntryData):
         super().normalize(archive, logger)
 
         # 1. Get the absolute path to the directory containing the mainfile
-        # archive.metadata.mainfile is the relative path (e.g. "upload/folder/trigger.rheed_metadata")
-        # archive.m_context.raw_path is the absolute path to the upload root
-        if not archive.m_context:
+        if not self.data_file:
             return
 
-        rel_mainfile = archive.metadata.mainfile
-        raw_root = archive.m_context.raw_path()
-        abs_mainfile = os.path.join(raw_root, rel_mainfile)
-        maindir = os.path.dirname(abs_mainfile)
-
-        # 2. List files in that directory
+        # 2. Use raw_file to find the folder
         try:
+            with archive.m_context.raw_file(self.data_file) as f:
+                abs_filepath = f.name
+
+            maindir = os.path.dirname(abs_filepath)
             files_in_dir = os.listdir(maindir)
         except Exception as e:
-            logger.error(f'Could not list files in {maindir}: {e}')
+            logger.warning(f'Could not scan directory for {self.data_file}: {e}')
             return
 
         # 3. Clear existing results to prevent duplicates on reprocessing
@@ -486,6 +492,28 @@ class RHEEDMeasurement(Measurement, EntryData):
         except Exception as e:
             logger.error(f'Pandas parsing failed: {e}')
             raise e
+
+
+# ------ Pointer Class ------
+class RawFileRHEEDData(EntryData):
+    """
+    This is the entry that NOMAD creates when it sees the .rheed_metadata file.
+    It contains nothing but a link to the actual RHEEDMeasurement ELN.
+    """
+
+    m_def = Section(
+        a_eln=ELNAnnotation(
+            overview=True, hide=['name', 'creation_time', 'last_processing_time']
+        )
+    )
+
+    measurement = Quantity(
+        type=RHEEDMeasurement,
+        description='Link to the editable ELN entry.',
+        a_eln=ELNAnnotation(
+            component=ELNComponentEnum.ReferenceEditQuantity,
+        ),
+    )
 
 
 m_package.__init_metainfo__()
