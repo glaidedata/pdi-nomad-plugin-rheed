@@ -1,0 +1,53 @@
+RHEEDMeasurement (inherits Measurement):
+  measurement_id: string
+  mbe_process_ref: reference --> growth run ID of the experiment 
+  datetime_start: datetime?
+  datetime_end: datetime?
+  operator: string?                  # optional (or rely on NOMAD authors)
+  instruments: [InstrumentReference] # base Measurement field (include used instrument entry)
+  sample: reference to sample , default is the sample in the center of the sample holder, can be pulled from the Experiment class which i s in the filledsubstaterholder
+
+  measurement_settings:
+    distance_sample_to_screen_mm: float?
+    image_length_calibration_mm_per_px: float?
+    electron_energy_keV: float?
+    emission_current_uA: float?
+    compensation_cage_on: bool?
+    beam_deflection_x: float?        # unit not specified
+    beam_deflection_y: float?        # unit not specified
+    beam_rocking: float|bool?        # unit not specified
+    incidence_angle_deg: float?
+
+  results:                           # repeatable
+    - RHEEDResult (inherits MeasurementResult):
+        result_type: video|image|scan_point
+        #datetime: datetime?
+        sample_azimuth_phi_deg: float? user adds this manually, not derived from the video
+        sample_rotation_alpha_deg: float? manually measured or inserted by the user, not derived from the video
+        notes: string?
+
+    - RHEEDVideoResult (RHEEDResult):
+        video_link: url
+        
+    - RHEEDImageResult (RHEEDResult):
+        images: [file, ...]
+        derived_from_video_link: url?
+        timestamp:
+        sample:
+
+    - RHEEDPointScanResult (RHEEDResult):
+        point_scans: [PointScan, ...]
+        start_time:
+        end_time:
+
+PointScan:
+  source_file: file                  # .asc and/or .csv
+  start_time: datetime?
+  end_time: datetime?
+  sensor_position_overview_picture: file?
+  derived_from_video_link: url?
+  sensors:
+    - name: string
+      position_label: string?
+      time: array
+      intensity: array
