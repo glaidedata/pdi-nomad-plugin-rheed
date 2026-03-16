@@ -35,23 +35,63 @@ class RHEEDPlot(PlotSection):
     m_def = Section(a_eln=ELNAnnotation(overview=True, lane_width='800px'))
 
 
-# ------ Settings ------
-class RHEEDMeasurementSettings(ArchiveSection):
-    m_def = Section(label='Measurement Settings')
+# ------ Instrument & Hardware Settings ------
+class ChamberGeometry(ArchiveSection):
     distance_sample_to_screen_mm = Quantity(
         type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
     )
+
+
+class Camera(ArchiveSection):
     image_length_calibration_mm_per_px = Quantity(
         type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
     )
+
+
+class InstrumentSettings(ArchiveSection):
+    chamber_geometry = SubSection(section_def=ChamberGeometry)
+    camera = SubSection(section_def=Camera)
+
+
+class EGunSTAIB(ArchiveSection):
     electron_energy_keV = Quantity(
         type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
     )
     emission_current_uA = Quantity(
         type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
     )
-    compensation_cage_on = Quantity(
-        type=bool, a_eln=dict(component=ELNComponentEnum.BoolEditQuantity)
+    filament_current_A = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+
+
+class EGunFUG(ArchiveSection):
+    electron_energy_keV = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    emission_current_uA = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    filament_current_A = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    filament_voltage_V = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    grid_voltage_V = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    topaz_voltage_V = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+
+
+class DeflectionUnitSTAIB(ArchiveSection):
+    grid = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    focus = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
     )
     beam_deflection_x = Quantity(
         type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
@@ -62,8 +102,114 @@ class RHEEDMeasurementSettings(ArchiveSection):
     beam_rocking = Quantity(
         type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
     )
+
+
+class DeflectionUnitFUG(ArchiveSection):
+    alignment_x = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    alignment_y = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    magnet_lens = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    x_or_y_scan = Quantity(
+        type=MEnum('x', 'y'), a_eln=dict(component=ELNComponentEnum.EnumEditQuantity)
+    )
+    ext_or_int_ref = Quantity(
+        type=MEnum('ext', 'int'),
+        a_eln=dict(component=ELNComponentEnum.EnumEditQuantity),
+    )
+    beam_deflection_x_coarse = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    beam_deflection_x_fine = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    beam_deflection_x_crosspoint = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    beam_deflection_x_angle = Quantity(
+        type=float,
+        description='corresponds to beam rocking',
+        a_eln=dict(component=ELNComponentEnum.NumberEditQuantity),
+    )
+    beam_deflection_y_coarse = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    beam_deflection_y_fine = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    beam_deflection_y_crosspoint = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    beam_deflection_y_angle = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+
+
+class RHEEDMeasurementSettings(ArchiveSection):
+    m_def = Section(label='Measurement Settings')
+    datetime = Quantity(
+        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
+    )
+    compensation_cage_on = Quantity(
+        type=bool, a_eln=dict(component=ELNComponentEnum.BoolEditQuantity)
+    )
     incidence_angle_deg = Quantity(
         type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+
+    egun_STAIB = SubSection(section_def=EGunSTAIB)
+    egun_FUG = SubSection(section_def=EGunFUG)
+    deflection_unit_STAIB = SubSection(section_def=DeflectionUnitSTAIB)
+    deflection_unit_FUG = SubSection(section_def=DeflectionUnitFUG)
+
+
+# ------ Substrate & Sample Definitions ------
+class SubstrateHolder(ArchiveSection):
+    rotation_angle_alpha_deg = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    position_measured = Quantity(
+        type=str, a_eln=dict(component=ELNComponentEnum.StringEditQuantity)
+    )
+    sample_phi_holder_alpha_deg = Quantity(
+        type=float,
+        description='Fixed offset of sample azimuth phi to holder rotation angle in deg',
+        a_eln=dict(component=ELNComponentEnum.NumberEditQuantity),
+    )
+
+
+class RHEEDSample(ArchiveSection):
+    sample_reference = SubSection(section_def=CompositeSystemReference)
+    sample_id = Quantity(
+        type=str, a_eln=dict(component=ELNComponentEnum.StringEditQuantity)
+    )
+    sample_azimuth_phi_deg = Quantity(
+        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+    )
+    substrate_or_film = Quantity(
+        type=MEnum('substrate', 'film'),
+        a_eln=dict(component=ELNComponentEnum.EnumEditQuantity),
+    )
+    sample_surface_compound = Quantity(
+        type=str,
+        description='Chemical formula, e.g., Al2O3 or Ga2O3',
+        a_eln=dict(component=ELNComponentEnum.StringEditQuantity),
+    )
+    sample_azimuth_uvw = Quantity(
+        type=np.int32,
+        shape=[3],
+        description='3 integers indexing real space direction',
+        a_eln=dict(component=ELNComponentEnum.NumberEditQuantity),
+    )
+    sample_azimuth_hkl = Quantity(
+        type=np.int32,
+        shape=[3],
+        description='3 integers indexing reciprocal space direction',
+        a_eln=dict(component=ELNComponentEnum.NumberEditQuantity),
     )
 
 
@@ -74,19 +220,17 @@ class RHEEDResult(MeasurementResult):
         type=MEnum('video', 'image', 'scan_point'),
         a_eln=dict(component=ELNComponentEnum.EnumEditQuantity),
     )
-    sample_azimuth_phi_deg = Quantity(
-        type=float,
-        description='User adds this manually, not derived from the video',
-        a_eln=dict(component=ELNComponentEnum.NumberEditQuantity),
-    )
-    sample_rotation_alpha_deg = Quantity(
-        type=float,
-        description='Manually measured or inserted by the user',
-        a_eln=dict(component=ELNComponentEnum.NumberEditQuantity),
+    datetime = Quantity(
+        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
     )
     notes = Quantity(
         type=str, a_eln=dict(component=ELNComponentEnum.RichTextEditQuantity)
     )
+    measurement_settings = SubSection(
+        section_def=RHEEDMeasurementSettings, a_eln=dict(hide=['*'])
+    )
+    substrate_holder = SubSection(section_def=SubstrateHolder, a_eln=dict(hide=['*']))
+    sample = SubSection(section_def=RHEEDSample)
 
 
 class RHEEDVideoResult(RHEEDResult):
@@ -112,7 +256,6 @@ class RHEEDImageResult(RHEEDResult, PlotSection):
     timestamp = Quantity(
         type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
     )
-    sample = SubSection(section_def=CompositeSystemReference)
     plot = SubSection(
         section_def=RHEEDPlot,
         description='Interactive plot of the image.',
@@ -122,9 +265,6 @@ class RHEEDImageResult(RHEEDResult, PlotSection):
 
 class RHEEDSensor(ArchiveSection):
     name = Quantity(type=str)
-    position_label = Quantity(
-        type=str, a_eln=dict(component=ELNComponentEnum.StringEditQuantity)
-    )
     time = Quantity(type=np.float64, shape=['*'])
     intensity = Quantity(type=np.float64, shape=['*'])
 
@@ -146,6 +286,12 @@ class PointScan(PlotSection, ArchiveSection):
     )
     sensor_position_overview_picture = Quantity(
         type=str,
+        a_browser=dict(adaptor='RawFileAdaptor'),
+        a_eln=dict(component=ELNComponentEnum.FileEditQuantity),
+    )
+    sensor_definition_file = Quantity(
+        type=str,
+        description='Expected .sn file',
         a_browser=dict(adaptor='RawFileAdaptor'),
         a_eln=dict(component=ELNComponentEnum.FileEditQuantity),
     )
@@ -182,7 +328,7 @@ class RHEEDMeasurement(Measurement, EntryData):
                 order=[
                     'name',
                     'measurement_id',
-                    'mbe_process_ref',
+                    'mbe_experiment_ref',
                     'datetime_start',
                     'datetime_end',
                     'operator',
@@ -208,7 +354,7 @@ class RHEEDMeasurement(Measurement, EntryData):
     # Right now, this is just a text string.
     # In the future, we will want to write logic that takes this string,
     # searches the NOMAD database for an MBE experiment with that ID, and creates a real clickable link.
-    mbe_process_ref = Quantity(
+    mbe_experiment_ref = Quantity(
         type=str,
         description='Growth run ID of the experiment',
         a_eln=dict(component=ELNComponentEnum.StringEditQuantity),
@@ -228,10 +374,11 @@ class RHEEDMeasurement(Measurement, EntryData):
     )
 
     sample = SubSection(
-        section_def=CompositeSystemReference,
-        description='Reference to sample, default is the sample in the center of the sample holder',
+        section_def=RHEEDSample, description='Detailed RHEED sample information'
     )
 
+    instrument_settings = SubSection(section_def=InstrumentSettings)
+    substrate_holder = SubSection(section_def=SubstrateHolder)
     measurement_settings = SubSection(section_def=RHEEDMeasurementSettings)
     results = SubSection(section_def=RHEEDResult, repeats=True)
 
