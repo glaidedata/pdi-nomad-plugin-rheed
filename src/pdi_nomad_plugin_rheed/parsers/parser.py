@@ -81,7 +81,6 @@ class RheedParser(MatchingParser):
             df = pd.read_csv(mainfile)
             df.columns = df.columns.str.strip()
             
-            # Create a unified datetime column for later matching
             if 'date' in df.columns and 'time' in df.columns:
                 df['parsed_datetime'] = pd.to_datetime(
                     df['date'].astype(str) + ' ' + df['time'].astype(str), 
@@ -117,7 +116,7 @@ class RheedParser(MatchingParser):
                 excel_path = os.path.join(mainfile_dir, excel_files[0])
                 df_excel = pd.read_excel(excel_path, sheet_name='RHEED settings')
                 measurement.instrument_settings = InstrumentSettings()
-                # You can map the df_excel columns to instrument_settings here
+                
             except Exception as e:
                 logger.warning(f'Could not parse Excel settings: {e}')
 
@@ -142,7 +141,6 @@ class RheedParser(MatchingParser):
             match = time_pattern.search(fname)
             if not match: continue
             
-            # Convert string to datetime
             try:
                 file_dt = datetime.strptime(match.group(1), "%Y-%m-%d___%H-%M-%S.%f")
             except ValueError: continue
@@ -151,7 +149,6 @@ class RheedParser(MatchingParser):
             if not result: continue
             result.datetime = file_dt.isoformat()
 
-            # Find the closest preceding metadata row
             if 'parsed_datetime' in df_meta.columns:
                 past_meta = df_meta[df_meta['parsed_datetime'] <= file_dt]
                 if not past_meta.empty:

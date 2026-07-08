@@ -79,7 +79,7 @@ class SubstrateHolder(ArchiveSection):
     position_measured = Quantity(type=str, a_eln=dict(component='StringEditQuantity'))
 
 class Sample(ArchiveSection):
-    sample_reference = Quantity(type=str, a_eln=dict(component='ReferenceEditQuantity'))
+    sample_reference = Quantity(type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity'))
     sample_id = Quantity(type=str, a_eln=dict(component='StringEditQuantity'))
     sample_azimuth_phi_deg = Quantity(type=float, description="Calculated automatically: sample_phi_holder_alpha_deg + rotation_angle_alpha_deg")
     substrate_or_film = Quantity(type=MEnum('substrate', 'film'), a_eln=dict(component='EnumEditQuantity'))
@@ -106,7 +106,6 @@ class RHEEDResult(MeasurementResult):
         if self.sample and self.substrate_holder:
             alpha = self.substrate_holder.rotation_angle_alpha_deg
             
-            # Look up to the parent RHEEDMeasurement to get the global offset
             parent_measurement = self.m_parent 
             if parent_measurement:
                 offset = parent_measurement.sample_phi_holder_alpha_deg
@@ -140,26 +139,22 @@ class RHEEDPointScanResult(RHEEDResult):
 # 5. Top-Level Measurement Entry
 # ---------------------------------------------------------
 class RHEEDMeasurement(Measurement):
-    mbe_experiment_ref = Quantity(type=str, a_eln=dict(component='ReferenceEditQuantity'), description="Reference to the higher-level MBE Experiment ID")
+    mbe_experiment_ref = Quantity(type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity'), description="Reference to the higher-level MBE Experiment ID")
     sample_phi_holder_alpha_deg = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
-    sample_ref = Quantity(type=str, a_eln=dict(component='ReferenceEditQuantity'))
+    sample_ref = Quantity(type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity'))
     color_table = Quantity(type=str, a_browser=dict(adaptor='RawFileAdaptor'))
     
     instrument_settings = SubSection(section_def=InstrumentSettings)
-    # measurement_settings = SubSection(section_def=RHEEDMeasurementSettings)
-    # sample = SubSection(section_def=Sample)
-
     results = SubSection(section_def=RHEEDResult, repeats=True)
 
     def normalize(self, archive, logger):
         super().normalize(archive, logger)
         
-        # Autogenerate the Measurement ID if possible
         if not self.measurement_id and self.results:
             first_result = self.results[0]
-            if first_result.sample and first_result.sample.sample_id:
+            if getattr(first_result, 'sample', None) and getattr(first_result.sample, 'sample_id', None):
                 s_id = first_result.sample.sample_id
-                dt = first_result.datetime
+                dt = getattr(first_result, 'datetime', None)
                 if dt:
                     dt_str = dt.strftime("%Y-%m-%d_%H-%M-%S")
                     self.measurement_id = f"RHD_{s_id}_{dt_str}"
