@@ -1,7 +1,7 @@
 import numpy as np
 from nomad.metainfo import SchemaPackage
 from nomad.metainfo import Quantity, SubSection, Section, Datetime, MEnum
-from nomad.datamodel.data import ArchiveSection
+from nomad.datamodel.data import ArchiveSection, EntryData
 from nomad.datamodel.metainfo.basesections import Measurement, MeasurementResult
 from nomad.datamodel.metainfo.annotations import ELNAnnotation, ELNComponentEnum
 
@@ -138,7 +138,12 @@ class RHEEDPointScanResult(RHEEDResult):
 # ---------------------------------------------------------
 # 5. Top-Level Measurement Entry
 # ---------------------------------------------------------
-class RHEEDMeasurement(Measurement):
+class RHEEDMeasurement(Measurement, EntryData):
+    measurement_id = Quantity(
+        type=str, 
+        a_eln=dict(component='StringEditQuantity'),
+        description="Auto-generated: RHD_[sample_id]_[datetime]"
+    )
     mbe_experiment_ref = Quantity(type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity'), description="Reference to the higher-level MBE Experiment ID")
     sample_phi_holder_alpha_deg = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
     sample_ref = Quantity(type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity'))
