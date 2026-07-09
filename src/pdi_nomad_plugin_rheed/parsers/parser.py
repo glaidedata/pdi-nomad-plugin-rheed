@@ -47,7 +47,11 @@ CSV_TO_SCHEMA_MAP = {
 }
 
 INSTRUMENT_SETTINGS_COLUMN_MAP = {
-    'electronicstype': (None, 'electronics_type', lambda value: str(value).strip().upper()),
+    'electronicstype': (
+        None,
+        'electronics_type',
+        lambda value: str(value).strip().upper(),
+    ),
     'electronics': (None, 'electronics_type', lambda value: str(value).strip().upper()),
     'distancesampletoscreenmm': (
         'chamber_geometry',
@@ -173,7 +177,7 @@ class RheedParser(MatchingParser):
                     if not non_null_values.empty:
                         assign_setting(column, non_null_values.iloc[0])
 
-                if len(df_excel.columns) >= 2:
+                if len(df_excel.columns) > 1:
                     key_column = df_excel.columns[0]
                     value_column = df_excel.columns[1]
                     for raw_key, raw_value in zip(
