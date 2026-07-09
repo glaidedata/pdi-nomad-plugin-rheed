@@ -1,13 +1,12 @@
 import os
 import re
-import pandas as pd
 from datetime import datetime
 
-import numpy as np
-from nomad.metainfo import SchemaPackage, Quantity, SubSection, Section, Datetime, MEnum
+import pandas as pd
 from nomad.datamodel.data import ArchiveSection, EntryData
+from nomad.datamodel.metainfo.annotations import ELNComponentEnum
 from nomad.datamodel.metainfo.basesections import Measurement, MeasurementResult
-from nomad.datamodel.metainfo.annotations import ELNAnnotation, ELNComponentEnum
+from nomad.metainfo import Datetime, MEnum, Quantity, SchemaPackage, Section, SubSection
 
 m_package = SchemaPackage()
 
@@ -142,8 +141,7 @@ class Sample(ArchiveSection):
     )
     sample_id = Quantity(type=str, a_eln=dict(component='StringEditQuantity'))
     sample_azimuth_phi_deg = Quantity(
-        type=float,
-        description='Calculated automatically: sample_phi_holder_alpha_deg + rotation_angle_alpha_deg',
+        type=float, description='Calculated automatically'
     )
     substrate_or_film = Quantity(
         type=MEnum('substrate', 'film'), a_eln=dict(component='EnumEditQuantity')
@@ -151,8 +149,8 @@ class Sample(ArchiveSection):
     sample_surface_compound = Quantity(
         type=str, a_eln=dict(component='StringEditQuantity')
     )
-    sample_azimuth_uvw = Quantity(type=str, a_eln=dict(component='StringEditQuantity'))
     sample_surface_hkl = Quantity(type=str, a_eln=dict(component='StringEditQuantity'))
+    sample_azimuth_uvw = Quantity(type=str, a_eln=dict(component='StringEditQuantity'))
 
 
 # ---------------------------------------------------------
@@ -171,7 +169,7 @@ class RHEEDResult(MeasurementResult):
         super().normalize(archive, logger)
         if self.sample and self.substrate_holder:
             alpha = self.substrate_holder.rotation_angle_alpha_deg
-            parent_measurement = self.m_parent 
+            parent_measurement = self.m_parent
             if parent_measurement:
                 offset = parent_measurement.sample_phi_holder_alpha_deg
                 if alpha is not None and offset is not None:
@@ -214,132 +212,176 @@ class RHEEDPointScanResult(RHEEDResult):
 # 5. Top-Level Measurement Entry
 # ---------------------------------------------------------
 class RHEEDMeasurement(Measurement, EntryData):
-    measurement_id = Quantity(type=str, a_eln=dict(component='StringEditQuantity'), description="Auto-generated")
-    
-    data_file = Quantity(type=str, a_eln=dict(component='FileEditQuantity'), a_browser=dict(adaptor='RawFileAdaptor'))
-    
-    mbe_experiment_ref = Quantity(type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity'), description="Reference to the higher-level MBE Experiment ID")
-    sample_phi_holder_alpha_deg = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
-    sample_ref = Quantity(type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity'))
+    measurement_id = Quantity(
+        type=str,
+        a_eln=dict(component='StringEditQuantity'),
+        description='Auto-generated',
+    )
+    data_file = Quantity(
+        type=str,
+        a_eln=dict(component='FileEditQuantity'),
+        a_browser=dict(adaptor='RawFileAdaptor'),
+    )
+    mbe_experiment_ref = Quantity(
+        type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity')
+    )
+    sample_phi_holder_alpha_deg = Quantity(
+        type=float, a_eln=dict(component='NumberEditQuantity')
+    )
+    sample_ref = Quantity(
+        type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity')
+    )
     color_table = Quantity(type=str, a_browser=dict(adaptor='RawFileAdaptor'))
-    
+
     instrument_settings = SubSection(section_def=InstrumentSettings)
     results = SubSection(section_def=RHEEDResult, repeats=True)
 
     def normalize(self, archive, logger):
-        # 1. PARSE THE DATA (Only if the file is mapped and results are empty to prevent overwriting edits)
         if self.data_file and not self.results:
             try:
                 with archive.m_context.raw_file(self.data_file, 'r') as f:
                     mainfile_path = f.name
-                
                 mainfile_dir = os.path.dirname(mainfile_path)
                 all_files = os.listdir(mainfile_dir)
-                
                 self._parse_all_data(mainfile_path, mainfile_dir, all_files, logger)
             except Exception as e:
-                if logger: logger.error(f'Error parsing RHEED metadata CSV: {e}')
+                if logger:
+                    logger.error(f'Error parsing RHEED metadata CSV: {e}')
 
-        # 2. AUTO-GENERATE MEASUREMENT ID
+        self._autogenerate_measurement_id()
+        super().normalize(archive, logger)
+
+    def _autogenerate_measurement_id(self):
         if not self.measurement_id and self.results:
             first_result = self.results[0]
-            if getattr(first_result, 'sample', None) and getattr(first_result.sample, 'sample_id', None):
+            if getattr(first_result, 'sample', None) and getattr(
+                first_result.sample, 'sample_id', None
+            ):
                 s_id = first_result.sample.sample_id
                 dt = getattr(first_result, 'datetime', None)
                 if dt:
-                    dt_str = dt.strftime("%Y-%m-%d_%H-%M-%S")
-                    self.measurement_id = f"RHD_{s_id}_{dt_str}"
-                    
-        super().normalize(archive, logger)
+                    dt_str = dt.strftime('%Y-%m-%d_%H-%M-%S')
+                    self.measurement_id = f'RHD_{s_id}_{dt_str}'
 
+    # --- PARSING LOGIC ---
     def _parse_all_data(self, mainfile_path, mainfile_dir, all_files, logger):
-        # A. Parse main CSV
+        df_meta = self._load_and_prep_csv(mainfile_path)
+        self._parse_excel_settings(mainfile_dir, all_files, logger)
+        df_rot = self._parse_rotation_log(mainfile_dir, logger)
+
+        assigned_files = self._process_explicit_files(df_meta, all_files)
+        self._process_unassigned_files(df_meta, df_rot, all_files, assigned_files)
+
+    def _load_and_prep_csv(self, mainfile_path):
         df_meta = pd.read_csv(mainfile_path)
         df_meta.columns = df_meta.columns.str.strip()
         if 'date' in df_meta.columns and 'time' in df_meta.columns:
             df_meta['parsed_datetime'] = pd.to_datetime(
-                df_meta['date'].astype(str) + ' ' + df_meta['time'].astype(str), errors='coerce'
+                df_meta['date'].astype(str) + ' ' + df_meta['time'].astype(str),
+                errors='coerce',
             )
-            
         if 'm8_id' in df_meta.columns:
             valid_ids = df_meta['m8_id'].dropna().astype(str)
             if not valid_ids.empty:
-                self.measurement_id = f"RHD_{valid_ids.iloc[0].split('_')[0]}"
+                self.measurement_id = f'RHD_{valid_ids.iloc[0].split("_")[0]}'
+        return df_meta
 
-        # B. Parse Excel Settings
+    def _parse_excel_settings(self, mainfile_dir, all_files, logger):
         excel_files = [f for f in all_files if f.endswith('.xlsx') and 'MBE' in f]
         if excel_files:
             try:
                 excel_path = os.path.join(mainfile_dir, excel_files[0])
                 _df_excel = pd.read_excel(excel_path, sheet_name='RHEED settings')
-                if logger: logger.info(f"Loaded {len(_df_excel)} rows from RHEED settings.")
+                if logger:
+                    logger.info(f'Loaded {len(_df_excel)} rows from RHEED settings.')
                 self.instrument_settings = InstrumentSettings()
             except Exception as e:
-                if logger: logger.warning(f'Could not parse Excel settings: {e}')
+                if logger:
+                    logger.warning(f'Could not parse Excel settings: {e}')
 
-        # C. Parse Rotation Log
-        df_rot = None
+    def _parse_rotation_log(self, mainfile_dir, logger):
         rot_path = os.path.join(mainfile_dir, 'rotation.txt')
         if os.path.exists(rot_path):
             try:
-                df_rot = pd.read_csv(rot_path, sep=r'\s+|,', engine='python')
+                return pd.read_csv(rot_path, sep=r'\s+|,', engine='python')
             except Exception as e:
-                if logger: logger.warning(f'Could not parse rotation log: {e}')
+                if logger:
+                    logger.warning(f'Could not parse rotation log: {e}')
+        return None
 
-        # D. Match Files and Construct Results
+    def _process_explicit_files(self, df_meta, all_files):
         assigned_files = set()
-        time_pattern = re.compile(r'(\d{4}-\d{2}-\d{2}___\d{2}-\d{2}-\d{2}\.\d{3})')
-
-        # Explicitly named files
         for _, row in df_meta.iterrows():
             fname = str(row.get('file_name', '')).strip()
             if fname and fname != 'nan':
                 assigned_files.add(fname)
                 result = self._create_result_instance(fname, all_files)
-                if not result: continue
-                
+                if not result:
+                    continue
+
                 if fname.endswith('.dst'):
                     result.video_link = str(row.get('file_path', ''))
-
                 if 'parsed_datetime' in row and pd.notna(row['parsed_datetime']):
                     result.datetime = row['parsed_datetime'].isoformat()
 
                 self._populate_schema_from_row(result, row)
                 self.results.append(result)
+        return assigned_files
 
-        # Unassigned Timestamp Matching
-        unassigned = [f for f in all_files if f not in assigned_files and f.endswith(('.tif', '.pgm', '.asc', '.csv'))]
+    def _process_unassigned_files(self, df_meta, df_rot, all_files, assigned_files):
+        time_pattern = re.compile(r'(\d{4}-\d{2}-\d{2}___\d{2}-\d{2}-\d{2}\.\d{3})')
+        unassigned = [
+            f
+            for f in all_files
+            if f not in assigned_files and f.endswith(('.tif', '.pgm', '.asc', '.csv'))
+        ]
+
         for fname in unassigned:
             match = time_pattern.search(fname)
-            if not match: continue
-
+            if not match:
+                continue
             try:
-                file_dt = datetime.strptime(match.group(1), "%Y-%m-%d___%H-%M-%S.%f")
-            except ValueError: continue
+                file_dt = datetime.strptime(match.group(1), '%Y-%m-%d___%H-%M-%S.%f')
+            except ValueError:
+                continue
 
             result = self._create_result_instance(fname, all_files)
-            if not result: continue
+            if not result:
+                continue
             result.datetime = file_dt.isoformat()
 
-            if 'parsed_datetime' in df_meta.columns:
-                past_meta = df_meta[df_meta['parsed_datetime'] <= file_dt]
-                if not past_meta.empty:
-                    best_row = past_meta.sort_values(by='parsed_datetime', ascending=False).iloc[0]
-                    self._populate_schema_from_row(result, best_row)
-
-            if df_rot is not None and 'parsed_datetime' in df_rot.columns:
-                past_rot = df_rot[df_rot['parsed_datetime'] <= file_dt]
-                if not past_rot.empty:
-                    best_rot = past_rot.sort_values(by='parsed_datetime', ascending=False).iloc[0]
-                    if result.substrate_holder is None: result.substrate_holder = SubstrateHolder()
-                    result.substrate_holder.rotation_angle_alpha_deg = float(best_rot.iloc[-1])
+            self._match_unassigned_metadata(result, file_dt, df_meta)
+            self._match_unassigned_rotation(result, file_dt, df_rot)
 
             self.results.append(result)
+
+    def _match_unassigned_metadata(self, result, file_dt, df_meta):
+        if 'parsed_datetime' in df_meta.columns:
+            past_meta = df_meta[df_meta['parsed_datetime'] <= file_dt]
+            if not past_meta.empty:
+                best_row = past_meta.sort_values(
+                    by='parsed_datetime', ascending=False
+                ).iloc[0]
+                self._populate_schema_from_row(result, best_row)
+
+    def _match_unassigned_rotation(self, result, file_dt, df_rot):
+        if df_rot is not None and 'parsed_datetime' in df_rot.columns:
+            past_rot = df_rot[df_rot['parsed_datetime'] <= file_dt]
+            if not past_rot.empty:
+                best_rot = past_rot.sort_values(
+                    by='parsed_datetime', ascending=False
+                ).iloc[0]
+                if result.substrate_holder is None:
+                    result.substrate_holder = SubstrateHolder()
+                result.substrate_holder.rotation_angle_alpha_deg = float(
+                    best_rot.iloc[-1]
+                )
 
     def _create_result_instance(self, fname, all_files):
         if fname.endswith(('.tif', '.pgm')) and 'sensor' not in fname.lower():
             res = RHEEDImageResult()
-            if fname in all_files: res.images = [fname]
+            if fname in all_files:
+                res.images = [fname]
             return res
         elif fname.endswith(('.asc', '.csv')) and 'sensor' not in fname.lower():
             return RHEEDPointScanResult()
@@ -347,62 +389,90 @@ class RHEEDMeasurement(Measurement, EntryData):
             return RHEEDVideoResult()
         return None
 
+    # --- REFACTORED SCHEMA MAPPING LOGIC ---
+    def _safe_float(self, val):
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return None
+
     def _populate_schema_from_row(self, result_obj, row):
-        def _safe_float(val):
-            try: return float(val)
-            except (ValueError, TypeError): return None
+        result_obj.sample = self._create_sample_from_row(row)
+        result_obj.substrate_holder = self._create_holder_from_row(row)
 
-        sample = Sample()
         settings = RHEEDMeasurementSettings()
-        holder = SubstrateHolder()
-        egun = EGunFUG()
-        deflect = DeflectionUnitFUG()
+        settings.e_gun_FUG = self._create_egun_from_row(row)
+        settings.deflection_unit_FUG = self._create_deflection_from_row(row)
+        result_obj.measurement_settings = settings
 
+        if pd.notna(row.get('comments')):
+            result_obj.notes = str(row['comments'])
+
+    def _create_sample_from_row(self, row):
+        sample = Sample()
         m8_val = str(row.get('m8_id', ''))
         if '_' in m8_val:
-            parts = m8_val.split('_')
-            sample.sample_id = parts[0]
-            holder.position_measured = parts[1]
+            sample.sample_id = m8_val.split('_', maxsplit=1)[0]
         elif m8_val and m8_val != 'nan':
             sample.sample_id = m8_val
 
-        if pd.notna(row.get('azimuth')): sample.sample_azimuth_uvw = str(row['azimuth'])
+        if pd.notna(row.get('azimuth')):
+            sample.sample_azimuth_uvw = str(row['azimuth'])
+
         if pd.notna(row.get('substrate')):
             sample.sample_surface_compound = str(row['substrate'])
             sample.substrate_or_film = 'substrate'
+            if pd.notna(row.get('substrate_orientation')):
+                sample.sample_surface_hkl = str(row['substrate_orientation'])
         elif pd.notna(row.get('film')):
             sample.sample_surface_compound = str(row['film'])
             sample.substrate_or_film = 'film'
+            if pd.notna(row.get('film_orientation')):
+                sample.sample_surface_hkl = str(row['film_orientation'])
+        return sample
 
-        alpha = _safe_float(row.get('mani_angle'))
-        if alpha is not None: holder.rotation_angle_alpha_deg = alpha
+    def _create_holder_from_row(self, row):
+        holder = SubstrateHolder()
+        m8_val = str(row.get('m8_id', ''))
+        if '_' in m8_val:
+            holder.position_measured = m8_val.split('_')[1]
 
-        e_kev = _safe_float(row.get('energy_kev'))
-        if e_kev is not None: egun.electron_energy_keV = e_kev
+        alpha = self._safe_float(row.get('mani_angle'))
+        if alpha is not None:
+            holder.rotation_angle_alpha_deg = alpha
+        return holder
 
-        emis = _safe_float(row.get('emission_uA'))
-        if emis is not None: egun.emission_current_uA = emis
+    def _create_egun_from_row(self, row):
+        egun = EGunFUG()
 
-        fil_a = _safe_float(row.get('filament_a'))
-        if fil_a is not None: egun.filament_current_A = fil_a
+        e_kev = self._safe_float(row.get('energy_kev'))
+        if e_kev is not None:
+            egun.electron_energy_keV = e_kev
 
-        fil_v = _safe_float(row.get('filament_v'))
-        if fil_v is not None: egun.filament_voltage_V = fil_v
+        emis = self._safe_float(row.get('emission_uA'))
+        if emis is not None:
+            egun.emission_current_uA = emis
 
-        grid_v = _safe_float(row.get('grid_v'))
-        if grid_v is not None: egun.grid_voltage_V = grid_v
+        fil_a = self._safe_float(row.get('filament_a'))
+        if fil_a is not None:
+            egun.filament_current_A = fil_a
 
-        x_al = _safe_float(row.get('x_align'))
-        if x_al is not None: deflect.alignment_x = x_al
+        fil_v = self._safe_float(row.get('filament_v'))
+        if fil_v is not None:
+            egun.filament_voltage_V = fil_v
 
-        if pd.notna(row.get('comments')): result_obj.notes = str(row['comments'])
+        grid_v = self._safe_float(row.get('grid_v'))
+        if grid_v is not None:
+            egun.grid_voltage_V = grid_v
 
-        settings.e_gun_FUG = egun
-        settings.deflection_unit_FUG = deflect
+        return egun
 
-        result_obj.sample = sample
-        result_obj.substrate_holder = holder
-        result_obj.measurement_settings = settings
+    def _create_deflection_from_row(self, row):
+        deflect = DeflectionUnitFUG()
+        x_al = self._safe_float(row.get('x_align'))
+        if x_al is not None:
+            deflect.alignment_x = x_al
+        return deflect
 
 
 # ---------------------------------------------------------
@@ -410,6 +480,7 @@ class RHEEDMeasurement(Measurement, EntryData):
 # ---------------------------------------------------------
 class RawFileRHEEDData(EntryData):
     """Placeholder for the raw RHEED metadata CSV to point to the generated ELN."""
+
     m_def = Section(label='Raw RHEED Metadata File')
 
     measurement = Quantity(
@@ -417,5 +488,6 @@ class RawFileRHEEDData(EntryData):
         a_eln=dict(component=ELNComponentEnum.ReferenceEditQuantity),
         description='The editable ELN archive generated from this raw metadata file.',
     )
+
 
 m_package.__init_metainfo__()

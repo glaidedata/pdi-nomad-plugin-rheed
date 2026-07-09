@@ -1,14 +1,13 @@
-import os
 from nomad.datamodel.context import ServerContext
 from nomad.datamodel.datamodel import EntryArchive
 from nomad.parsing.parser import MatchingParser
-
 from nomad_measurements.utils import create_archive
 
 from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
-    RHEEDMeasurement,
     RawFileRHEEDData,
+    RHEEDMeasurement,
 )
+
 
 class RheedParser(MatchingParser):
     def parse(
@@ -32,5 +31,5 @@ class RheedParser(MatchingParser):
         archive_name = f'{"".join(data_file.split(".")[:-1])}.archive.json'
         eln_ref = create_archive(entry, archive, archive_name)
 
-        # 3. Link the raw metadata CSV file to the generated ELN 
+        # 3. Link the raw metadata CSV file to the generated ELN
         archive.data = RawFileRHEEDData(measurement=eln_ref)
