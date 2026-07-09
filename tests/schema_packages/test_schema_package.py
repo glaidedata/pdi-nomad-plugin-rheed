@@ -1,52 +1,68 @@
-import datetime
+from contextlib import contextmanager
+from unittest.mock import MagicMock
 
 from nomad.datamodel import EntryArchive, EntryMetadata
 from nomad.utils import get_logger
 
-from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
-    RHEEDImageResult,
-    RHEEDMeasurement,
-    Sample,
-    SubstrateHolder,
-)
+from pdi_nomad_plugin_rheed.schema_packages.schema_package import RHEEDMeasurement
 
 
-def test_schema_normalization():
-    # 1. Setup the archive and main measurement
+def test_schema_extraction_normalization(tmp_path):
+    """
+    Tests the heavy-lifting extraction engine inside the normalizer.
+    Verifies that it reads the CSV, parses the metadata, and populates the schema tree.
+    """
+    # 1. Create a dummy CSV file with mock data
+    test_file = tmp_path / 'm84266_A_RHEED_meta_final.csv'
+    csv_content = (
+        'm8_id,date,time,file_name,azimuth,energy_kev,comments\n'
+        'm84266_A,2026-03-13,16:33:40,dummy_image.tif,1 1 0,15.5,Test Comment\n'
+    )
+    test_file.write_text(csv_content)
+
+    # 2. Setup the Archive and ELN entry
     archive = EntryArchive()
     archive.metadata = EntryMetadata(entry_name='test_rheed_entry')
+
     measurement = RHEEDMeasurement()
+    measurement.data_file = str(test_file)  # Point the normalizer to our dummy file
     archive.data = measurement
 
-    # Set the global offset angle
-    measurement.sample_phi_holder_alpha_deg = 15.0
+    # 3. Mock the raw_file context manager so the normalizer can "open" the file
+    archive.m_context = MagicMock()
 
-    # 2. Setup a mock Image Result
-    result = RHEEDImageResult()
-    result.datetime = datetime.datetime(2026, 3, 13, 16, 30, 0)
+    @contextmanager
+    def mock_raw_file(filename, mode):
+        class MockFile:
+            name = str(test_file)
 
-    # Add Sample and SubstrateHolder data to the result
-    result.sample = Sample(sample_id='m84266')
-    result.substrate_holder = SubstrateHolder(rotation_angle_alpha_deg=30.0)
+        yield MockFile()
 
-    # Append to the polymorphic results list
-    measurement.results.append(result)
+    archive.m_context.raw_file.side_effect = mock_raw_file
 
-    # 3. Run Normalization
+    # 4. Run Normalization
     logger = get_logger(__name__)
-
-    # NOMAD normalizes from the bottom up, so we normalize the result first
-    result.normalize(archive, logger)
     measurement.normalize(archive, logger)
 
-    # 4. Assertions to verify our schema logic
-
-    # Check if the auto-ID generation works correctly
-    assert measurement.measurement_id == 'RHD_m84266_2026-03-13_16-30-00', (
-        f"Expected 'RHD_m84266_2026-03-13_16-30-00', got '{measurement.measurement_id}'"
+    # 5. Assertions
+    # Verify the global Measurement ID was pulled from m8_id
+    assert measurement.measurement_id == 'RHD_m84266', (
+        f"Expected 'RHD_m84266', got '{measurement.measurement_id}'"
     )
 
-    # Check if the math for the sample azimuth phi degree works (15.0 + 30.0 = 45.0)
-    assert result.sample.sample_azimuth_phi_deg == 45.0, (  # noqa: PLR2004
-        f"Expected 45.0, got '{result.sample.sample_azimuth_phi_deg}'"
+    # Verify the result was generated
+    assert len(measurement.results) == 1, (
+        'Normalizer did not create a result entry for the CSV row.'
+    )
+
+    res = measurement.results[0]
+
+    # Verify specific data mapping
+    assert res.sample.sample_id == 'm84266', 'Failed to parse sample_id from m8_id'
+    assert res.sample.sample_azimuth_uvw == '1 1 0', 'Failed to map azimuth'
+    assert res.notes == 'Test Comment', 'Failed to map comments to notes'
+
+    # Verify deeply nested hardware mapping
+    assert res.measurement_settings.e_gun_FUG.electron_energy_keV == 15.5, (  # noqa: PLR2004
+        'Failed to map nested electron_energy_keV'
     )
