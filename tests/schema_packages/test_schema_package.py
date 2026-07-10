@@ -1,79 +1,68 @@
-import numpy as np
-from nomad.client import normalize_all
-from nomad.datamodel import EntryArchive
+from contextlib import contextmanager
+from unittest.mock import MagicMock
 
-from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
-    ChamberGeometry,
-    EGunSTAIB,
-    InstrumentSettings,
-    PointScan,
-    RHEEDMeasurement,
-    RHEEDMeasurementSettings,
-    RHEEDPointScanResult,
-    RHEEDSample,
-    SubstrateHolder,
-)
+from nomad.datamodel import EntryArchive, EntryMetadata
+from nomad.utils import get_logger
+
+from pdi_nomad_plugin_rheed.schema_packages.schema_package import RHEEDMeasurement
 
 
-def test_schema_instantiation():
+def test_schema_extraction_normalization(tmp_path):
     """
-    Tests if the new highly-structured RHEEDMeasurement schema can be
-    instantiated, populated with the new hardware/sample classes, and normalized.
+    Tests the heavy-lifting extraction engine inside the normalizer.
+    Verifies that it reads the CSV, parses the metadata, and populates the schema tree.
     """
-    entry = RHEEDMeasurement()
+    # 1. Create a dummy CSV file with mock data
+    test_file = tmp_path / 'm84266_A_RHEED_meta_final.csv'
+    csv_content = (
+        'm8_id,date,time,file_name,azimuth,energy_kev,comments\n'
+        'm84266_A,2026-03-13,16:33:40,dummy_image.tif,1 1 0,15.5,Test Comment\n'
+    )
+    test_file.write_text(csv_content)
 
-    # 1. Test the renamed reference field
-    entry.mbe_experiment_ref = 'm84123'
+    # 2. Setup the Archive and ELN entry
+    archive = EntryArchive()
+    archive.metadata = EntryMetadata(entry_name='test_rheed_entry')
 
-    # 2. Test new Instrument Settings
-    entry.instrument_settings = InstrumentSettings(
-        chamber_geometry=ChamberGeometry(distance_sample_to_screen_mm=150.0)
+    measurement = RHEEDMeasurement()
+    measurement.data_file = str(test_file)  # Point the normalizer to our dummy file
+    archive.data = measurement
+
+    # 3. Mock the raw_file context manager so the normalizer can "open" the file
+    archive.m_context = MagicMock()
+
+    @contextmanager
+    def mock_raw_file(filename, mode):
+        class MockFile:
+            name = str(test_file)
+
+        yield MockFile()
+
+    archive.m_context.raw_file.side_effect = mock_raw_file
+
+    # 4. Run Normalization
+    logger = get_logger(__name__)
+    measurement.normalize(archive, logger)
+
+    # 5. Assertions
+    # Verify the global Measurement ID was pulled from m8_id
+    assert measurement.measurement_id == 'RHD_m84266', (
+        f"Expected 'RHD_m84266', got '{measurement.measurement_id}'"
     )
 
-    # 3. Test Substrate Holder
-    entry.substrate_holder = SubstrateHolder(rotation_angle_alpha_deg=45.0)
-
-    # 4. Test RHEEDSample (with numpy array for crystallographic direction)
-    entry.sample = RHEEDSample(
-        sample_id='PDI_Sample_001',
-        sample_azimuth_uvw=np.array([1, 1, 0], dtype=np.int32),
+    # Verify the result was generated
+    assert len(measurement.results) == 1, (
+        'Normalizer did not create a result entry for the CSV row.'
     )
 
-    # 5. Test nested Measurement Settings (Vendor-specific hardware)
-    entry.measurement_settings = RHEEDMeasurementSettings(
-        compensation_cage_on=True, egun_STAIB=EGunSTAIB(electron_energy_keV=15.0)
-    )
+    res = measurement.results[0]
 
-    # 6. Create a Point Scan Result with the new sensor_definition_file
-    scan_item = PointScan()
-    scan_item.source_file = 'dummy_scan.csv'
-    scan_item.sensor_definition_file = 'dummy_config.sn'
+    # Verify specific data mapping
+    assert res.sample.sample_id == 'm84266', 'Failed to parse sample_id from m8_id'
+    assert res.sample.sample_azimuth_uvw == '1 1 0', 'Failed to map azimuth'
+    assert res.notes == 'Test Comment', 'Failed to map comments to notes'
 
-    scan_result = RHEEDPointScanResult()
-    scan_result.point_scans.append(scan_item)
-
-    # 7. Add result to the root measurement
-    entry.results.append(scan_result)
-
-    # 8. Create Archive & Normalize
-    archive = EntryArchive(data=entry)
-    normalize_all(archive)
-
-    # 9. Verify structures and types
-    assert isinstance(archive.data, RHEEDMeasurement)
-    assert archive.data.mbe_experiment_ref == 'm84123'
-    assert (
-        archive.data.instrument_settings.chamber_geometry.distance_sample_to_screen_mm
-        == 150.0  # noqa PLR2004
-    )
-    assert archive.data.substrate_holder.rotation_angle_alpha_deg == 45.0  # noqa PLR2004
-    assert archive.data.sample.sample_id == 'PDI_Sample_001'
-    assert list(archive.data.sample.sample_azimuth_uvw) == [1, 1, 0]
-    assert archive.data.measurement_settings.egun_STAIB.electron_energy_keV == 15.0  # noqa PLR2004
-
-    assert len(archive.data.results) == 1
-    assert archive.data.results[0].point_scans[0].source_file == 'dummy_scan.csv'
-    assert (
-        archive.data.results[0].point_scans[0].sensor_definition_file
-        == 'dummy_config.sn'
+    # Verify deeply nested hardware mapping
+    assert res.measurement_settings.e_gun_FUG.electron_energy_keV == 15.5, (  # noqa: PLR2004
+        'Failed to map nested electron_energy_keV'
     )

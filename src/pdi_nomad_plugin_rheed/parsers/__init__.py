@@ -1,17 +1,17 @@
 from nomad.config.models.plugins import ParserEntryPoint
 
 
-class RHEEDParserEntryPoint(ParserEntryPoint):
+class RheedParserEntryPoint(ParserEntryPoint):
     def load(self):
-        from pdi_nomad_plugin_rheed.parsers.parser import RHEEDParser
+        from pdi_nomad_plugin_rheed.parsers.parser import RheedParser
 
-        return RHEEDParser(**self.model_dump())
+        return RheedParser(**self.dict())
 
 
-rheed_parser_entry_point = RHEEDParserEntryPoint(
-    name='RHEEDParser',
-    description='Parser for PDI RHEED measurements. Triggered by a .rheed_metadata file.',
-    # CRITICAL CHANGE: Only trigger on specific dummy file extension!
-    mainfile_name_re=r'.*\.rheed_metadata$',
-    level=1,
+rheed_parser_entry_point = RheedParserEntryPoint(
+    name='RheedParser',
+    description='Parser for RHEED experiment data, driven by a master metadata CSV.',
+    # This regex is case-insensitive and matches any CSV containing "rheed_meta"
+    # e.g., m84266_A_RHEED_meta_final.csv, test_rheed_meta.csv, RHEED_meta.csv
+    mainfile_name_re=r'^.*[rR][hH][eE][eE][dD]_[mM][eE][tT][aA].*\.csv$',
 )

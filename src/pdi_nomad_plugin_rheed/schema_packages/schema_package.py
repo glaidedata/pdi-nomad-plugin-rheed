@@ -1,665 +1,535 @@
 import os
 import re
-from typing import TYPE_CHECKING
+from datetime import datetime
 
-import numpy as np
 import pandas as pd
-import plotly.graph_objs as go
-from nomad.datamodel.metainfo.plot import PlotlyFigure
-from PIL import Image
-
-if TYPE_CHECKING:
-    pass
-
 from nomad.datamodel.data import ArchiveSection, EntryData
-from nomad.datamodel.metainfo.annotations import (
-    ELNAnnotation,
-    ELNComponentEnum,
-    SectionProperties,
-)
-from nomad.datamodel.metainfo.basesections import (
-    CompositeSystemReference,
-    Measurement,
-    MeasurementResult,
-)
-from nomad.datamodel.metainfo.plot import PlotSection
+from nomad.datamodel.metainfo.annotations import ELNComponentEnum
+from nomad.datamodel.metainfo.basesections import Measurement, MeasurementResult
 from nomad.metainfo import Datetime, MEnum, Quantity, SchemaPackage, Section, SubSection
 
 m_package = SchemaPackage()
 
 
-# ------ Plot Helper ------
-class RHEEDPlot(PlotSection):
-    """Wrapper for plots to ensure they render correctly in the ELN overview."""
-
-    m_def = Section(a_eln=ELNAnnotation(overview=True, lane_width='800px'))
-
-
-# ------ Instrument & Hardware Settings ------
+# ---------------------------------------------------------
+# 1. Global Instrument Sections
+# ---------------------------------------------------------
 class ChamberGeometry(ArchiveSection):
     distance_sample_to_screen_mm = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
 
 
 class Camera(ArchiveSection):
+    resolution_x_px = Quantity(type=int, a_eln=dict(component='NumberEditQuantity'))
+    resolution_y_px = Quantity(type=int, a_eln=dict(component='NumberEditQuantity'))
     image_length_calibration_mm_per_px = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
 
 
 class InstrumentSettings(ArchiveSection):
+    electronics_type = Quantity(
+        type=MEnum('FUG', 'STAIB'), a_eln=dict(component='EnumEditQuantity')
+    )
     chamber_geometry = SubSection(section_def=ChamberGeometry)
     camera = SubSection(section_def=Camera)
 
 
+# ---------------------------------------------------------
+# 2. Hardware Settings (Dynamic)
+# ---------------------------------------------------------
 class EGunSTAIB(ArchiveSection):
     electron_energy_keV = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
     emission_current_uA = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
     filament_current_A = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
 
 
 class EGunFUG(ArchiveSection):
     electron_energy_keV = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
     emission_current_uA = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
     filament_current_A = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
     filament_voltage_V = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
-    grid_voltage_V = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
-    )
-    topaz_voltage_V = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
-    )
+    grid_voltage_V = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
+    topaz_voltage_V = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
 
 
 class DeflectionUnitSTAIB(ArchiveSection):
-    grid = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
-    )
-    focus = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
-    )
-    beam_deflection_x = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
-    )
-    beam_deflection_y = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
-    )
-    beam_rocking = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
-    )
+    grid = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
+    focus = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
+    beam_deflection_x = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
+    beam_deflection_y = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
+    beam_rocking = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
 
 
 class DeflectionUnitFUG(ArchiveSection):
-    alignment_x = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
-    )
-    alignment_y = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
-    )
-    magnet_lens = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
-    )
+    alignment_x = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
+    alignment_y = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
+    magnet_lens = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
     x_or_y_scan = Quantity(
-        type=MEnum('x', 'y'), a_eln=dict(component=ELNComponentEnum.EnumEditQuantity)
+        type=MEnum('x', 'y'), a_eln=dict(component='EnumEditQuantity')
     )
     ext_or_int_ref = Quantity(
-        type=MEnum('ext', 'int'),
-        a_eln=dict(component=ELNComponentEnum.EnumEditQuantity),
+        type=MEnum('ext', 'int'), a_eln=dict(component='EnumEditQuantity')
     )
     beam_deflection_x_coarse = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
     beam_deflection_x_fine = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
     beam_deflection_x_crosspoint = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
     beam_deflection_x_angle = Quantity(
-        type=float,
-        description='corresponds to beam rocking',
-        a_eln=dict(component=ELNComponentEnum.NumberEditQuantity),
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
     beam_deflection_y_coarse = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
     beam_deflection_y_fine = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
     beam_deflection_y_crosspoint = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
     beam_deflection_y_angle = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
 
 
 class RHEEDMeasurementSettings(ArchiveSection):
-    m_def = Section(label='Measurement Settings')
-    datetime = Quantity(
-        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
-    )
-    compensation_cage_on = Quantity(
-        type=bool, a_eln=dict(component=ELNComponentEnum.BoolEditQuantity)
-    )
+    datetime = Quantity(type=Datetime, a_eln=dict(component='DateTimeEditQuantity'))
+    compensation_cage_on = Quantity(type=bool, a_eln=dict(component='BoolEditQuantity'))
     incidence_angle_deg = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
 
-    egun_STAIB = SubSection(section_def=EGunSTAIB)
-    egun_FUG = SubSection(section_def=EGunFUG)
+    e_gun_STAIB = SubSection(section_def=EGunSTAIB)
+    e_gun_FUG = SubSection(section_def=EGunFUG)
     deflection_unit_STAIB = SubSection(section_def=DeflectionUnitSTAIB)
     deflection_unit_FUG = SubSection(section_def=DeflectionUnitFUG)
 
 
-# ------ Substrate & Sample Definitions ------
+# ---------------------------------------------------------
+# 3. Sample and Substrate Context
+# ---------------------------------------------------------
 class SubstrateHolder(ArchiveSection):
     rotation_angle_alpha_deg = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
-    position_measured = Quantity(
-        type=str, a_eln=dict(component=ELNComponentEnum.StringEditQuantity)
-    )
-    sample_phi_holder_alpha_deg = Quantity(
-        type=float,
-        description='Fixed offset of sample azimuth phi to holder rotation angle in deg',
-        a_eln=dict(component=ELNComponentEnum.NumberEditQuantity),
-    )
+    position_measured = Quantity(type=str, a_eln=dict(component='StringEditQuantity'))
 
 
-class RHEEDSample(ArchiveSection):
-    sample_reference = SubSection(section_def=CompositeSystemReference)
-    sample_id = Quantity(
-        type=str, a_eln=dict(component=ELNComponentEnum.StringEditQuantity)
+class Sample(ArchiveSection):
+    sample_reference = Quantity(
+        type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity')
     )
+    sample_id = Quantity(type=str, a_eln=dict(component='StringEditQuantity'))
     sample_azimuth_phi_deg = Quantity(
-        type=float, a_eln=dict(component=ELNComponentEnum.NumberEditQuantity)
+        type=float, description='Calculated automatically'
     )
     substrate_or_film = Quantity(
-        type=MEnum('substrate', 'film'),
-        a_eln=dict(component=ELNComponentEnum.EnumEditQuantity),
+        type=MEnum('substrate', 'film'), a_eln=dict(component='EnumEditQuantity')
     )
     sample_surface_compound = Quantity(
-        type=str,
-        description='Chemical formula, e.g., Al2O3 or Ga2O3',
-        a_eln=dict(component=ELNComponentEnum.StringEditQuantity),
+        type=str, a_eln=dict(component='StringEditQuantity')
     )
-    sample_azimuth_uvw = Quantity(
-        type=np.int32,
-        shape=[3],
-        description='3 integers indexing real space direction',
-        a_eln=dict(component=ELNComponentEnum.NumberEditQuantity),
-    )
-    sample_azimuth_hkl = Quantity(
-        type=np.int32,
-        shape=[3],
-        description='3 integers indexing reciprocal space direction',
-        a_eln=dict(component=ELNComponentEnum.NumberEditQuantity),
-    )
+    sample_surface_hkl = Quantity(type=str, a_eln=dict(component='StringEditQuantity'))
+    sample_azimuth_uvw = Quantity(type=str, a_eln=dict(component='StringEditQuantity'))
 
 
-# ------  Results ------
+# ---------------------------------------------------------
+# 4. Result Sections
+# ---------------------------------------------------------
 class RHEEDResult(MeasurementResult):
-    m_def = Section(label='RHEED Result')
-    result_type = Quantity(
-        type=MEnum('video', 'image', 'scan_point'),
-        a_eln=dict(component=ELNComponentEnum.EnumEditQuantity),
-    )
-    datetime = Quantity(
-        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
-    )
-    notes = Quantity(
-        type=str, a_eln=dict(component=ELNComponentEnum.RichTextEditQuantity)
-    )
-    measurement_settings = SubSection(
-        section_def=RHEEDMeasurementSettings, a_eln=dict(hide=['*'])
-    )
-    substrate_holder = SubSection(section_def=SubstrateHolder, a_eln=dict(hide=['*']))
-    sample = SubSection(section_def=RHEEDSample)
+    result_type = Quantity(type=MEnum('video', 'image', 'scan_point'))
+    datetime = Quantity(type=Datetime, a_eln=dict(component='DateTimeEditQuantity'))
+
+    measurement_settings = SubSection(section_def=RHEEDMeasurementSettings)
+    substrate_holder = SubSection(section_def=SubstrateHolder)
+    sample = SubSection(section_def=Sample)
+    notes = Quantity(type=str, a_eln=dict(component='RichTextEditQuantity'))
+
+    def normalize(self, archive, logger):
+        """Triggers the math to calculate the final sample azimuth angle from the holder offset."""
+        super().normalize(archive, logger)
+        if self.sample and self.substrate_holder:
+            alpha = self.substrate_holder.rotation_angle_alpha_deg
+            parent_measurement = self.m_parent
+            if parent_measurement:
+                offset = parent_measurement.sample_phi_holder_alpha_deg
+                if alpha is not None and offset is not None:
+                    self.sample.sample_azimuth_phi_deg = alpha + offset
 
 
 class RHEEDVideoResult(RHEEDResult):
-    m_def = Section(label='Video Result')
-    video_link = Quantity(
-        type=str, a_eln=dict(component=ELNComponentEnum.URLEditQuantity)
-    )
+    video_link = Quantity(type=str, a_eln=dict(component='StringEditQuantity'))
+    start_time = Quantity(type=Datetime, a_eln=dict(component='DateTimeEditQuantity'))
+    end_time = Quantity(type=Datetime, a_eln=dict(component='DateTimeEditQuantity'))
+    frame_interval_s = Quantity(type=float, a_eln=dict(component='NumberEditQuantity'))
+    number_of_frames = Quantity(type=int, a_eln=dict(component='NumberEditQuantity'))
 
 
-class RHEEDImageResult(RHEEDResult, PlotSection):
-    m_def = Section(
-        label='Image Result', a_eln=ELNAnnotation(overview=True, lane_width='600px')
-    )
-    images = Quantity(
-        type=str,
-        shape=['*'],
-        a_browser=dict(adaptor='RawFileAdaptor'),
-        a_eln=dict(component=ELNComponentEnum.FileEditQuantity),
-    )
+class RHEEDImageResult(RHEEDResult):
+    images = Quantity(type=str, shape=['*'], a_browser=dict(adaptor='RawFileAdaptor'))
     derived_from_video_link = Quantity(
-        type=str, a_eln=dict(component=ELNComponentEnum.URLEditQuantity)
-    )
-    timestamp = Quantity(
-        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
-    )
-    plot = SubSection(
-        section_def=RHEEDPlot,
-        description='Interactive plot of the image.',
-        a_eln=ELNAnnotation(overview=True),
+        type=str, a_eln=dict(component='StringEditQuantity')
     )
 
 
-class RHEEDSensor(ArchiveSection):
-    name = Quantity(type=str)
-    time = Quantity(type=np.float64, shape=['*'])
-    intensity = Quantity(type=np.float64, shape=['*'])
-
-
-class PointScan(PlotSection, ArchiveSection):
-    m_def = Section(
-        label='Point Scan Data', a_eln=ELNAnnotation(overview=True, lane_width='600px')
-    )
-    source_file = Quantity(
-        type=str,
-        a_browser=dict(adaptor='RawFileAdaptor'),
-        a_eln=dict(component=ELNComponentEnum.FileEditQuantity),
-    )
-    start_time = Quantity(
-        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
-    )
-    end_time = Quantity(
-        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
-    )
+class PointScan(ArchiveSection):
+    source_file = Quantity(type=str, a_browser=dict(adaptor='RawFileAdaptor'))
+    start_time = Quantity(type=Datetime)
+    end_time = Quantity(type=Datetime)
     sensor_position_overview_picture = Quantity(
-        type=str,
-        a_browser=dict(adaptor='RawFileAdaptor'),
-        a_eln=dict(component=ELNComponentEnum.FileEditQuantity),
+        type=str, a_browser=dict(adaptor='RawFileAdaptor')
     )
     sensor_definition_file = Quantity(
-        type=str,
-        description='Expected .sn file',
-        a_browser=dict(adaptor='RawFileAdaptor'),
-        a_eln=dict(component=ELNComponentEnum.FileEditQuantity),
+        type=str, a_browser=dict(adaptor='RawFileAdaptor')
     )
-    derived_from_video_link = Quantity(
-        type=str, a_eln=dict(component=ELNComponentEnum.URLEditQuantity)
-    )
-    sensors = SubSection(section_def=RHEEDSensor, repeats=True)
-    plot = SubSection(
-        section_def=RHEEDPlot,
-        description='Interactive plot of the scan.',
-        a_eln=ELNAnnotation(overview=True),
-    )
+    derived_from_video_link = Quantity(type=str)
 
 
 class RHEEDPointScanResult(RHEEDResult):
-    m_def = Section(label='Point Scan Result')
-    start_time = Quantity(
-        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
-    )
-    end_time = Quantity(
-        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
-    )
     point_scans = SubSection(section_def=PointScan, repeats=True)
 
 
-# ------ Main Container ------
+# ---------------------------------------------------------
+# 5. Top-Level Measurement Entry
+# ---------------------------------------------------------
 class RHEEDMeasurement(Measurement, EntryData):
-    m_def = Section(
-        label='RHEED Measurement',
-        a_eln=ELNAnnotation(
-            overview=True,
-            lane_width='800px',
-            properties=SectionProperties(
-                order=[
-                    'name',
-                    'measurement_id',
-                    'mbe_experiment_ref',
-                    'datetime_start',
-                    'datetime_end',
-                    'operator',
-                    'instruments',
-                    'sample',
-                ]
-            ),
-        ),
+    measurement_id = Quantity(
+        type=str,
+        a_eln=dict(component='StringEditQuantity'),
+        description='Auto-generated',
     )
-
     data_file = Quantity(
         type=str,
-        description='The dummy file that triggered this entry. Used to locate the data folder.',
-        a_eln=dict(component=ELNComponentEnum.FileEditQuantity),
+        a_eln=dict(component='FileEditQuantity'),
+        a_browser=dict(adaptor='RawFileAdaptor'),
     )
-
-    measurement_id = Quantity(
-        type=str, a_eln=dict(component=ELNComponentEnum.StringEditQuantity)
-    )
-
-    # TODO
-    # Future Improvement:
-    # Right now, this is just a text string.
-    # In the future, we will want to write logic that takes this string,
-    # searches the NOMAD database for an MBE experiment with that ID, and creates a real clickable link.
     mbe_experiment_ref = Quantity(
-        type=str,
-        description='Growth run ID of the experiment',
-        a_eln=dict(component=ELNComponentEnum.StringEditQuantity),
+        type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity')
     )
-
-    datetime_start = Quantity(
-        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
+    sample_phi_holder_alpha_deg = Quantity(
+        type=float, a_eln=dict(component='NumberEditQuantity')
     )
-    datetime_end = Quantity(
-        type=Datetime, a_eln=dict(component=ELNComponentEnum.DateTimeEditQuantity)
+    sample_ref = Quantity(
+        type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity')
     )
-    # TODO: Ask PDI if this should be a simple string or a User reference.
-    operator = Quantity(
-        type=str,
-        description='Name of the person who performed the measurement.',
-        a_eln=dict(component=ELNComponentEnum.StringEditQuantity),
-    )
-
-    sample = SubSection(
-        section_def=RHEEDSample, description='Detailed RHEED sample information'
-    )
+    color_table = Quantity(type=str, a_browser=dict(adaptor='RawFileAdaptor'))
 
     instrument_settings = SubSection(section_def=InstrumentSettings)
-    substrate_holder = SubSection(section_def=SubstrateHolder)
-    measurement_settings = SubSection(section_def=RHEEDMeasurementSettings)
     results = SubSection(section_def=RHEEDResult, repeats=True)
 
     def normalize(self, archive, logger):
-        """
-        Scans the directory and populates 'results'.
-        """
+        """Main trigger: locates uploaded files in the server context and starts the parsing process."""
+        if self.data_file and not self.results:
+            try:
+                with archive.m_context.raw_file(self.data_file, 'r') as f:
+                    mainfile_path = f.name
+                mainfile_dir = os.path.dirname(mainfile_path)
+                all_files = os.listdir(mainfile_dir)
+                self._parse_all_data(mainfile_path, mainfile_dir, all_files, logger)
+            except Exception as e:
+                if logger:
+                    logger.error(f'Error parsing RHEED metadata CSV: {e}')
+
+        self._autogenerate_measurement_id()
         super().normalize(archive, logger)
 
-        # 1. Get the absolute path to the directory containing the mainfile
-        if not self.data_file:
-            return
+    def _autogenerate_measurement_id(self):
+        """Creates a standardized ID based on the sample name and timestamp."""
+        if not self.measurement_id and self.results:
+            first_result = self.results[0]
+            if getattr(first_result, 'sample', None) and getattr(
+                first_result.sample, 'sample_id', None
+            ):
+                s_id = first_result.sample.sample_id
+                dt = getattr(first_result, 'datetime', None)
+                if dt:
+                    dt_str = dt.strftime('%Y-%m-%d_%H-%M-%S')
+                    self.measurement_id = f'RHD_{s_id}_{dt_str}'
 
-        # 2. Use raw_file to find the folder
-        try:
-            with archive.m_context.raw_file(self.data_file) as f:
-                abs_filepath = f.name
+    # --- PARSING LOGIC ---
+    def _parse_all_data(self, mainfile_path, mainfile_dir, all_files, logger):
+        """Master controller that orchestrates reading all files and mapping the data."""
+        df_meta = self._load_and_prep_csv(mainfile_path)
+        self._parse_excel_settings(mainfile_dir, all_files, logger)
+        df_rot = self._parse_rotation_log(mainfile_dir, logger)
 
-            maindir = os.path.dirname(abs_filepath)
-            files_in_dir = os.listdir(maindir)
-        except Exception as e:
-            logger.warning(f'Could not scan directory for {self.data_file}: {e}')
-            return
+        assigned_files = self._process_explicit_files(df_meta, all_files)
+        self._process_unassigned_files(df_meta, df_rot, all_files, assigned_files)
 
-        # 3. Clear existing results to prevent duplicates on reprocessing
-        self.results = []
+    def _load_and_prep_csv(self, mainfile_path):
+        """Reads the master CSV and formats the timestamp columns for easy matching."""
+        df_meta = pd.read_csv(mainfile_path)
+        df_meta.columns = df_meta.columns.str.strip()
+        if 'date' in df_meta.columns and 'time' in df_meta.columns:
+            time_fixed = df_meta['time'].astype(str).str.replace('-', ':', regex=False)
+            df_meta['parsed_datetime'] = pd.to_datetime(
+                df_meta['date'].astype(str) + ' ' + time_fixed,
+                errors='coerce',
+            )
+        if 'm8_id' in df_meta.columns:
+            valid_ids = df_meta['m8_id'].dropna().astype(str)
+            if not valid_ids.empty:
+                self.measurement_id = f'RHD_{valid_ids.iloc[0].split("_")[0]}'
+        return df_meta
 
-        # 4. Process Images
-        image_files = [
-            f for f in files_in_dir if f.lower().endswith(('.pgm', '.tiff', '.tif'))
-        ]
-        for img_filename in image_files:
-            img_path = os.path.join(maindir, img_filename)
-            img_result = RHEEDImageResult()
-            img_result.result_type = 'image'
-            img_result.images = [img_filename]
-
-            self._extract_timestamp_filename(img_filename, img_result)
-
+    def _parse_excel_settings(self, mainfile_dir, all_files, logger):
+        """Extracts static instrument configurations from the MBE Excel file."""
+        excel_files = [f for f in all_files if f.endswith('.xlsx') and 'MBE' in f]
+        if excel_files:
             try:
-                if img_filename.lower().endswith('.pgm'):
-                    self.parse_pgm(img_path, img_result, img_filename, logger)
-                elif img_filename.lower().endswith(('.tiff', '.tif')):
-                    self.parse_tiff(img_path, img_result, img_filename)
-                self.results.append(img_result)
+                excel_path = os.path.join(mainfile_dir, excel_files[0])
+                _df_excel = pd.read_excel(excel_path, sheet_name='RHEED settings')
+                if logger:
+                    logger.info(f'Loaded {len(_df_excel)} rows from RHEED settings.')
+                self.instrument_settings = InstrumentSettings()
             except Exception as e:
-                logger.error(f'Failed to parse image {img_filename}: {e}')
+                if logger:
+                    logger.warning(f'Could not parse Excel settings: {e}')
 
-        # 5. Process Scans
-        scan_files = [f for f in files_in_dir if f.lower().endswith(('.csv', '.asc'))]
-        if scan_files:
-            scan_collection = RHEEDPointScanResult()
-            scan_collection.result_type = 'scan_point'
-            for scan_filename in scan_files:
-                scan_path = os.path.join(maindir, scan_filename)
-                pt_scan = PointScan()
-                pt_scan.source_file = scan_filename
-                try:
-                    self.parse_scan(scan_path, pt_scan, scan_filename, logger)
-                    scan_collection.point_scans.append(pt_scan)
-                except Exception as e:
-                    logger.error(f'Failed to parse scan {scan_filename}: {e}')
-            if scan_collection.point_scans:
-                self.results.append(scan_collection)
-
-    # ------ Helper Methods for Parsing ------
-    def _extract_timestamp_filename(self, filename: str, entry):
-        """
-        Extracts timestamp from filename based on PDI conventions.
-        Format: image_YYYY-MM-DD___HH-MM-SS.mmm.tif
-        """
-        try:
-            clean_name = filename.rsplit('.', 1)[0]
-
-            if clean_name.startswith('image_'):
-                clean_name = clean_name.replace('image_', '')
-
-            if '___' in clean_name:
-                parts = clean_name.split('___')
-                date_part = parts[0]
-                time_part = parts[1]
-                time_part = time_part.replace('-', ':')
-                entry.timestamp = f'{date_part}T{time_part}Z'
-            else:
-                entry.timestamp = clean_name
-        except Exception:
-            pass
-
-    def parse_pgm(self, mainfile, entry, filename, logger):
-        """
-        PGM Logic: Raw intensity data -> Heatmap with Scale Bar
-        """
-        img_array = self._read_pgm_robustly(mainfile, logger)
-
-        if img_array is not None:
-            fig = go.Figure(
-                data=go.Heatmap(
-                    z=img_array,
-                    colorscale='Viridis',
-                    showscale=True,
-                    colorbar=dict(title='Intensity', titleside='right'),
-                )
-            )
-
-            fig.update_layout(
-                title=f'RHEED Intensity: {filename}',
-                template='plotly_white',
-                autosize=False,
-                width=700,
-                height=600,
-                yaxis=dict(scaleanchor='x', scaleratio=1, autorange='reversed'),
-            )
-
-            entry.plot = RHEEDPlot()
-            entry.plot.figures.append(
-                PlotlyFigure(label='Intensity Map', figure=fig.to_plotly_json())
-            )
-
-    def _read_pgm_robustly(self, filepath, logger):
-        """
-        Tries to read PGM using PIL. If that fails (due to value > maxval),
-        falls back to manual text parsing for P2 (ASCII) files.
-        """
-        # Method 1: Try Standard PIL
-        try:
-            with Image.open(filepath) as img:
-                if img.mode.startswith('I;16'):
-                    converted_img = img.convert('I')
-                return np.array(converted_img)
-        # Method 2: Fallback for P2 files (SAFIRE output)
-        except Exception as e:
+    def _parse_rotation_log(self, mainfile_dir, logger):
+        """Reads 'Rotation.txt' to extract real-time sample rotation angles."""
+        rot_path = os.path.join(mainfile_dir, 'Rotation.txt')
+        if os.path.exists(rot_path):
             try:
-                with open(filepath, encoding='latin-1') as f:
-                    header_peek = f.read(50)
-                    if not header_peek.strip().startswith('P2'):
-                        raise e
+                return pd.read_csv(rot_path, sep=r'\s+|,', engine='python')
+            except Exception as e:
+                if logger:
+                    logger.warning(f'Could not parse rotation log: {e}')
+        return None
 
-                    f.seek(0)
-                    content = f.read()
-                    content = re.sub(r'#.*', '', content)
-                    tokens = content.split()
-                    width = int(tokens[1])
-                    height = int(tokens[2])
+    def _process_explicit_files(self, df_meta, all_files):
+        """Maps files that are explicitly named in the CSV rows (like video links)."""
+        assigned_files = set()
+        for _, row in df_meta.iterrows():
+            fname = str(row.get('file_name', '')).strip()
+            if fname and fname != 'nan':
+                assigned_files.add(fname)
+                result = self._create_result_instance(fname, all_files)
+                if not result:
+                    continue
 
-                    data = np.array(tokens[4:], dtype=np.int32)
-                    return data.reshape((height, width))
+                if fname.endswith('.dst'):
+                    result.video_link = str(row.get('file_path', ''))
+                if 'parsed_datetime' in row and pd.notna(row['parsed_datetime']):
+                    result.datetime = row['parsed_datetime'].isoformat()
 
-            except Exception as manual_error:
-                logger.error(f'Manual PGM read also failed: {manual_error}')
-                raise e
+                self._populate_schema_from_row(result, row)
+                self.results.append(result)
+        return assigned_files
 
-    def parse_tiff(self, mainfile, entry, filename):
-        """
-        TIFF Logic: Visual snapshot -> Standard Image Plot
-        """
-        with Image.open(mainfile) as img:
-            img_rgb = img.convert('RGB')
-            img_array = np.array(img_rgb)
-            width, height = img.size
+    def _process_unassigned_files(self, df_meta, df_rot, all_files, assigned_files):
+        """Scans the upload folder for images and matches them to CSV rows based on their timestamp."""
+        time_pattern = re.compile(r'(\d{4}-\d{2}-\d{2}___\d{2}-\d{2}-\d{2}\.\d{3})')
+        unassigned = [
+            f
+            for f in all_files
+            if f not in assigned_files and f.endswith(('.tif', '.pgm', '.asc', '.csv'))
+        ]
 
-            fig = go.Figure()
+        for fname in unassigned:
+            match = time_pattern.search(fname)
+            if not match:
+                continue
+            try:
+                file_dt = datetime.strptime(match.group(1), '%Y-%m-%d___%H-%M-%S.%f')
+            except ValueError:
+                continue
 
-            fig.add_trace(go.Image(z=img_array))
+            result = self._create_result_instance(fname, all_files)
+            if not result:
+                continue
+            result.datetime = file_dt.isoformat()
 
-            fig.update_layout(
-                title=f'RHEED Snapshot: {filename}',
-                template='plotly_white',
-                autosize=False,
-                width=width,
-                height=height,
-                margin=dict(l=50, r=50, t=50, b=50),
-                xaxis=dict(visible=True, title='pixels', ticks='outside'),
-                yaxis=dict(
-                    visible=True,
-                    title='pixels',
-                    ticks='outside',
-                    scaleanchor='x',
-                    scaleratio=1,
-                    autorange='reversed',
-                ),
-            )
+            self._match_unassigned_metadata(result, file_dt, df_meta)
+            self._match_unassigned_rotation(result, file_dt, df_rot)
 
-            entry.plot = RHEEDPlot()
-            entry.plot.figures.append(
-                PlotlyFigure(label='Snapshot', figure=fig.to_plotly_json())
-            )
+            self.results.append(result)
 
-    def parse_scan(self, mainfile, entry, filename, logger):
-        """
-        Parses PDI 'Point Scan' files (space-separated, specific header).
-        """
-        # 1. Extract Timestamp (starttiem?) from Line 1 ("Recorded at ...")
-        with open(mainfile) as f:
-            first_line = f.readline().strip()
-            if 'Recorded at' in first_line:
-                raw_time = first_line.replace('Recorded at', '').strip()
-                if raw_time:
-                    try:
-                        parts = raw_time.split()
-                        MIN_TIMESTAMP_PARTS = 2
-                        if len(parts) >= MIN_TIMESTAMP_PARTS:
-                            entry.start_time = f'{parts[0]}T{parts[1]}Z'
-                    except Exception:
-                        logger.warning(f'Could not parse timestamp from: {raw_time}')
+    def _match_unassigned_metadata(self, result, file_dt, df_meta):
+        """Finds the closest preceding CSV log entry for a given image's timestamp."""
+        if 'parsed_datetime' in df_meta.columns:
+            past_meta = df_meta[df_meta['parsed_datetime'] <= file_dt]
+            if not past_meta.empty:
+                best_row = past_meta.sort_values(
+                    by='parsed_datetime', ascending=False
+                ).iloc[0]
+                self._populate_schema_from_row(result, best_row)
 
-        # 2. Read Data Table
-        try:
-            # The structure is always: Time | Sensor1 | Sensor2 ...
-            df = pd.read_csv(mainfile, skiprows=4, header=None, sep=r'\s+')
-
-            if df.empty:
-                logger.warning('Parsed dataframe is empty.')
-                return
-
-            time_data = df.iloc[:, 0].values
-            sensor_data_block = df.iloc[:, 1:]
-
-            fig = go.Figure()
-
-            for i, col_index in enumerate(sensor_data_block.columns):
-                intensity = sensor_data_block[col_index].values
-
-                sensor_name = f'Sensor {i + 1}'
-
-                sensor = RHEEDSensor()
-                sensor.name = sensor_name
-                sensor.time = time_data
-                sensor.intensity = intensity
-                entry.sensors.append(sensor)
-
-                fig.add_trace(
-                    go.Scatter(x=time_data, y=intensity, mode='lines', name=sensor_name)
+    def _match_unassigned_rotation(self, result, file_dt, df_rot):
+        """Finds the closest preceding rotation angle for a given image's timestamp."""
+        if df_rot is not None and 'parsed_datetime' in df_rot.columns:
+            past_rot = df_rot[df_rot['parsed_datetime'] <= file_dt]
+            if not past_rot.empty:
+                best_rot = past_rot.sort_values(
+                    by='parsed_datetime', ascending=False
+                ).iloc[0]
+                if result.substrate_holder is None:
+                    result.substrate_holder = SubstrateHolder()
+                result.substrate_holder.rotation_angle_alpha_deg = float(
+                    best_rot.iloc[-1]
                 )
 
-            fig.update_layout(
-                title=f'Point Scan: {filename}',
-                xaxis_title='Time [s]',
-                yaxis_title='Intensity',
-                template='plotly_white',
-                showlegend=True,
-                legend=dict(
-                    title='Sensors',
-                    yanchor='top',
-                    y=0.99,
-                    xanchor='left',
-                    x=0.01,
-                    bgcolor='rgba(255, 255, 255, 0.9)',
-                    bordercolor='Black',
-                    borderwidth=1,
-                ),
-            )
+    def _create_result_instance(self, fname, all_files):
+        """Instantiates the correct schema SubSection (Image, Video, or Point Scan) based on file extension."""
+        if fname.endswith(('.tif', '.pgm')):
+            res = RHEEDImageResult()
+            if fname in all_files:
+                res.images = [fname]
+            return res
+        elif fname.endswith(('.asc', '.csv')) and 'sensor' not in fname.lower():
+            return RHEEDPointScanResult()
+        elif fname.endswith('.dst'):
+            return RHEEDVideoResult()
+        return None
 
-            entry.plot = RHEEDPlot()
-            entry.plot.figures.append(
-                PlotlyFigure(label='Scan Intensity', figure=fig.to_plotly_json())
-            )
+    # --- REFACTORED SCHEMA MAPPING LOGIC ---
+    def _safe_float(self, val):
+        """Safely converts string values to floats, returning None instead of crashing on empty cells."""
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return None
 
-        except Exception as e:
-            logger.error(f'Pandas parsing failed: {e}')
-            raise e
+    def _populate_schema_from_row(self, result_obj, row):
+        result_obj.sample = self._create_sample_from_row(row)
+        result_obj.substrate_holder = self._create_holder_from_row(row)
+
+        settings = RHEEDMeasurementSettings()
+        settings.e_gun_FUG = self._create_egun_from_row(row)
+        settings.deflection_unit_FUG = self._create_deflection_from_row(row)
+        result_obj.measurement_settings = settings
+
+        if pd.notna(row.get('comments')):
+            result_obj.notes = str(row['comments'])
+
+        if isinstance(result_obj, RHEEDVideoResult):
+            if pd.notna(row.get('parsed_datetime')):
+                result_obj.start_time = row['parsed_datetime'].isoformat()
+
+            comments = str(row.get('comments', ''))
+
+            interval_match = re.search(r'frame_interval_s=([\d\.]+)', comments)
+            frames_match = re.search(r'number_of_frames=([\d]+)', comments)
+
+            if interval_match:
+                result_obj.frame_interval_s = float(interval_match.group(1))
+            if frames_match:
+                result_obj.number_of_frames = int(frames_match.group(1))
+
+            if (
+                getattr(result_obj, 'frame_interval_s', None)
+                and getattr(result_obj, 'number_of_frames', None)
+                and pd.notna(row.get('parsed_datetime'))
+            ):
+                end_dt = row['parsed_datetime'] + pd.Timedelta(
+                    seconds=(result_obj.number_of_frames - 1)
+                    * result_obj.frame_interval_s
+                )
+                result_obj.end_time = end_dt.isoformat()
+
+    def _create_sample_from_row(self, row):
+        """Extracts sample ID, orientation, and compound details from a CSV row."""
+        sample = Sample()
+        m8_val = str(row.get('m8_id', ''))
+        if '_' in m8_val:
+            sample.sample_id = m8_val.split('_', maxsplit=1)[0]
+        elif m8_val and m8_val != 'nan':
+            sample.sample_id = m8_val
+
+        if pd.notna(row.get('azimuth')):
+            sample.sample_azimuth_uvw = str(row['azimuth'])
+
+        if pd.notna(row.get('substrate')):
+            sample.sample_surface_compound = str(row['substrate'])
+            sample.substrate_or_film = 'substrate'
+            if pd.notna(row.get('substrate_orientation')):
+                sample.sample_surface_hkl = str(row['substrate_orientation'])
+        elif pd.notna(row.get('film')):
+            sample.sample_surface_compound = str(row['film'])
+            sample.substrate_or_film = 'film'
+            if pd.notna(row.get('film_orientation')):
+                sample.sample_surface_hkl = str(row['film_orientation'])
+        return sample
+
+    def _create_holder_from_row(self, row):
+        """Extracts the substrate position and manual manipulation angle."""
+        holder = SubstrateHolder()
+        m8_val = str(row.get('m8_id', ''))
+        if '_' in m8_val:
+            holder.position_measured = m8_val.split('_')[1]
+
+        alpha = self._safe_float(row.get('mani_angle'))
+        if alpha is not None:
+            holder.rotation_angle_alpha_deg = alpha
+        return holder
+
+    def _create_egun_from_row(self, row):
+        """Extracts E-Gun settings like energy, emission, and filament currents."""
+        egun = EGunFUG()
+
+        e_kev = self._safe_float(row.get('energy_kev'))
+        if e_kev is not None:
+            egun.electron_energy_keV = e_kev
+
+        emis = self._safe_float(row.get('emission_uA'))
+        if emis is not None:
+            egun.emission_current_uA = emis
+
+        fil_a = self._safe_float(row.get('filament_a'))
+        if fil_a is not None:
+            egun.filament_current_A = fil_a
+
+        fil_v = self._safe_float(row.get('filament_v'))
+        if fil_v is not None:
+            egun.filament_voltage_V = fil_v
+
+        grid_v = self._safe_float(row.get('grid_v'))
+        if grid_v is not None:
+            egun.grid_voltage_V = grid_v
+
+        return egun
+
+    def _create_deflection_from_row(self, row):
+        """Extracts beam deflection and alignment settings."""
+        deflect = DeflectionUnitFUG()
+        x_al = self._safe_float(row.get('x_align'))
+        if x_al is not None:
+            deflect.alignment_x = x_al
+        return deflect
 
 
-# ------ Pointer Class ------
+# ---------------------------------------------------------
+# 6. Raw File Pointer Section
+# ---------------------------------------------------------
 class RawFileRHEEDData(EntryData):
-    """
-    This is the entry that NOMAD creates when it sees the .rheed_metadata file.
-    It contains nothing but a link to the actual RHEEDMeasurement ELN.
-    """
+    """Placeholder for the raw RHEED metadata CSV to point to the generated ELN."""
 
-    m_def = Section(
-        a_eln=ELNAnnotation(
-            overview=True, hide=['name', 'creation_time', 'last_processing_time']
-        )
-    )
+    m_def = Section(label='Raw RHEED Metadata File')
 
     measurement = Quantity(
         type=RHEEDMeasurement,
-        description='Link to the editable ELN entry.',
-        a_eln=ELNAnnotation(
-            component=ELNComponentEnum.ReferenceEditQuantity,
-        ),
+        a_eln=dict(component=ELNComponentEnum.ReferenceEditQuantity),
+        description='The editable ELN archive generated from this raw metadata file.',
     )
 
 
