@@ -166,6 +166,7 @@ class RHEEDResult(MeasurementResult):
     notes = Quantity(type=str, a_eln=dict(component='RichTextEditQuantity'))
 
     def normalize(self, archive, logger):
+        """Triggers the math to calculate the final sample azimuth angle from the holder offset."""
         super().normalize(archive, logger)
         if self.sample and self.substrate_holder:
             alpha = self.substrate_holder.rotation_angle_alpha_deg
@@ -237,6 +238,7 @@ class RHEEDMeasurement(Measurement, EntryData):
     results = SubSection(section_def=RHEEDResult, repeats=True)
 
     def normalize(self, archive, logger):
+        """Main trigger: locates uploaded files in the server context and starts the parsing process."""
         if self.data_file and not self.results:
             try:
                 with archive.m_context.raw_file(self.data_file, 'r') as f:
@@ -252,6 +254,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         super().normalize(archive, logger)
 
     def _autogenerate_measurement_id(self):
+        """Creates a standardized ID based on the sample name and timestamp."""
         if not self.measurement_id and self.results:
             first_result = self.results[0]
             if getattr(first_result, 'sample', None) and getattr(
@@ -265,6 +268,7 @@ class RHEEDMeasurement(Measurement, EntryData):
 
     # --- PARSING LOGIC ---
     def _parse_all_data(self, mainfile_path, mainfile_dir, all_files, logger):
+        """Master controller that orchestrates reading all files and mapping the data."""
         df_meta = self._load_and_prep_csv(mainfile_path)
         self._parse_excel_settings(mainfile_dir, all_files, logger)
         df_rot = self._parse_rotation_log(mainfile_dir, logger)
@@ -273,6 +277,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         self._process_unassigned_files(df_meta, df_rot, all_files, assigned_files)
 
     def _load_and_prep_csv(self, mainfile_path):
+        """Reads the master CSV and formats the timestamp columns for easy matching."""
         df_meta = pd.read_csv(mainfile_path)
         df_meta.columns = df_meta.columns.str.strip()
         if 'date' in df_meta.columns and 'time' in df_meta.columns:
@@ -287,6 +292,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         return df_meta
 
     def _parse_excel_settings(self, mainfile_dir, all_files, logger):
+        """Extracts static instrument configurations from the MBE Excel file."""
         excel_files = [f for f in all_files if f.endswith('.xlsx') and 'MBE' in f]
         if excel_files:
             try:
@@ -300,7 +306,8 @@ class RHEEDMeasurement(Measurement, EntryData):
                     logger.warning(f'Could not parse Excel settings: {e}')
 
     def _parse_rotation_log(self, mainfile_dir, logger):
-        rot_path = os.path.join(mainfile_dir, 'rotation.txt')
+        """Reads 'Rotation.txt' to extract real-time sample rotation angles."""
+        rot_path = os.path.join(mainfile_dir, 'Rotation.txt')
         if os.path.exists(rot_path):
             try:
                 return pd.read_csv(rot_path, sep=r'\s+|,', engine='python')
@@ -310,6 +317,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         return None
 
     def _process_explicit_files(self, df_meta, all_files):
+        """Maps files that are explicitly named in the CSV rows (like video links)."""
         assigned_files = set()
         for _, row in df_meta.iterrows():
             fname = str(row.get('file_name', '')).strip()
@@ -329,6 +337,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         return assigned_files
 
     def _process_unassigned_files(self, df_meta, df_rot, all_files, assigned_files):
+        """Scans the upload folder for images and matches them to CSV rows based on their timestamp."""
         time_pattern = re.compile(r'(\d{4}-\d{2}-\d{2}___\d{2}-\d{2}-\d{2}\.\d{3})')
         unassigned = [
             f
@@ -356,6 +365,7 @@ class RHEEDMeasurement(Measurement, EntryData):
             self.results.append(result)
 
     def _match_unassigned_metadata(self, result, file_dt, df_meta):
+        """Finds the closest preceding CSV log entry for a given image's timestamp."""
         if 'parsed_datetime' in df_meta.columns:
             past_meta = df_meta[df_meta['parsed_datetime'] <= file_dt]
             if not past_meta.empty:
@@ -365,6 +375,7 @@ class RHEEDMeasurement(Measurement, EntryData):
                 self._populate_schema_from_row(result, best_row)
 
     def _match_unassigned_rotation(self, result, file_dt, df_rot):
+        """Finds the closest preceding rotation angle for a given image's timestamp."""
         if df_rot is not None and 'parsed_datetime' in df_rot.columns:
             past_rot = df_rot[df_rot['parsed_datetime'] <= file_dt]
             if not past_rot.empty:
@@ -378,6 +389,7 @@ class RHEEDMeasurement(Measurement, EntryData):
                 )
 
     def _create_result_instance(self, fname, all_files):
+        """Instantiates the correct schema SubSection (Image, Video, or Point Scan) based on file extension."""
         if fname.endswith(('.tif', '.pgm')) and 'sensor' not in fname.lower():
             res = RHEEDImageResult()
             if fname in all_files:
@@ -391,12 +403,14 @@ class RHEEDMeasurement(Measurement, EntryData):
 
     # --- REFACTORED SCHEMA MAPPING LOGIC ---
     def _safe_float(self, val):
+        """Safely converts string values to floats, returning None instead of crashing on empty cells."""
         try:
             return float(val)
         except (ValueError, TypeError):
             return None
 
     def _populate_schema_from_row(self, result_obj, row):
+        """Delegates the row data to specific hardware and sample helper functions."""
         result_obj.sample = self._create_sample_from_row(row)
         result_obj.substrate_holder = self._create_holder_from_row(row)
 
@@ -409,6 +423,7 @@ class RHEEDMeasurement(Measurement, EntryData):
             result_obj.notes = str(row['comments'])
 
     def _create_sample_from_row(self, row):
+        """Extracts sample ID, orientation, and compound details from a CSV row."""
         sample = Sample()
         m8_val = str(row.get('m8_id', ''))
         if '_' in m8_val:
@@ -432,6 +447,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         return sample
 
     def _create_holder_from_row(self, row):
+        """Extracts the substrate position and manual manipulation angle."""
         holder = SubstrateHolder()
         m8_val = str(row.get('m8_id', ''))
         if '_' in m8_val:
@@ -443,6 +459,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         return holder
 
     def _create_egun_from_row(self, row):
+        """Extracts E-Gun settings like energy, emission, and filament currents."""
         egun = EGunFUG()
 
         e_kev = self._safe_float(row.get('energy_kev'))
@@ -468,6 +485,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         return egun
 
     def _create_deflection_from_row(self, row):
+        """Extracts beam deflection and alignment settings."""
         deflect = DeflectionUnitFUG()
         x_al = self._safe_float(row.get('x_align'))
         if x_al is not None:
