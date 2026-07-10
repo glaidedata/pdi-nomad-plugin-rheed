@@ -281,8 +281,9 @@ class RHEEDMeasurement(Measurement, EntryData):
         df_meta = pd.read_csv(mainfile_path)
         df_meta.columns = df_meta.columns.str.strip()
         if 'date' in df_meta.columns and 'time' in df_meta.columns:
+            time_fixed = df_meta['time'].astype(str).str.replace('-', ':', regex=False)
             df_meta['parsed_datetime'] = pd.to_datetime(
-                df_meta['date'].astype(str) + ' ' + df_meta['time'].astype(str),
+                df_meta['date'].astype(str) + ' ' + time_fixed,
                 errors='coerce',
             )
         if 'm8_id' in df_meta.columns:
@@ -390,7 +391,7 @@ class RHEEDMeasurement(Measurement, EntryData):
 
     def _create_result_instance(self, fname, all_files):
         """Instantiates the correct schema SubSection (Image, Video, or Point Scan) based on file extension."""
-        if fname.endswith(('.tif', '.pgm')) and 'sensor' not in fname.lower():
+        if fname.endswith(('.tif', '.pgm')):
             res = RHEEDImageResult()
             if fname in all_files:
                 res.images = [fname]
@@ -410,7 +411,6 @@ class RHEEDMeasurement(Measurement, EntryData):
             return None
 
     def _populate_schema_from_row(self, result_obj, row):
-        """Delegates the row data to specific hardware and sample helper functions."""
         result_obj.sample = self._create_sample_from_row(row)
         result_obj.substrate_holder = self._create_holder_from_row(row)
 
@@ -421,6 +421,31 @@ class RHEEDMeasurement(Measurement, EntryData):
 
         if pd.notna(row.get('comments')):
             result_obj.notes = str(row['comments'])
+
+        if isinstance(result_obj, RHEEDVideoResult):
+            if pd.notna(row.get('parsed_datetime')):
+                result_obj.start_time = row['parsed_datetime'].isoformat()
+
+            comments = str(row.get('comments', ''))
+
+            interval_match = re.search(r'frame_interval_s=([\d\.]+)', comments)
+            frames_match = re.search(r'number_of_frames=([\d]+)', comments)
+
+            if interval_match:
+                result_obj.frame_interval_s = float(interval_match.group(1))
+            if frames_match:
+                result_obj.number_of_frames = int(frames_match.group(1))
+
+            if (
+                getattr(result_obj, 'frame_interval_s', None)
+                and getattr(result_obj, 'number_of_frames', None)
+                and pd.notna(row.get('parsed_datetime'))
+            ):
+                end_dt = row['parsed_datetime'] + pd.Timedelta(
+                    seconds=(result_obj.number_of_frames - 1)
+                    * result_obj.frame_interval_s
+                )
+                result_obj.end_time = end_dt.isoformat()
 
     def _create_sample_from_row(self, row):
         """Extracts sample ID, orientation, and compound details from a CSV row."""
