@@ -1,3 +1,4 @@
+import csv
 import os
 import re
 from datetime import datetime
@@ -292,16 +293,80 @@ class RHEEDMeasurement(Measurement, EntryData):
                 self.measurement_id = f'RHD_{valid_ids.iloc[0].split("_")[0]}'
         return df_meta
 
-    def _parse_excel_settings(self, mainfile_dir, all_files, logger):
+    def _parse_excel_settings(  # noqa: PLR0912
+        self, mainfile_dir, all_files, logger
+    ):
         """Extracts static instrument configurations from the MBE Excel file."""
         excel_files = [f for f in all_files if f.endswith('.xlsx') and 'MBE' in f]
         if excel_files:
             try:
                 excel_path = os.path.join(mainfile_dir, excel_files[0])
-                _df_excel = pd.read_excel(excel_path, sheet_name='RHEED settings')
+                df_excel = pd.read_excel(
+                    excel_path, sheet_name='RHEED settings', header=None
+                )
                 if logger:
-                    logger.info(f'Loaded {len(_df_excel)} rows from RHEED settings.')
-                self.instrument_settings = InstrumentSettings()
+                    logger.info(f'Loaded {len(df_excel)} rows from RHEED settings.')
+
+                field_row_index = None
+                for index, row in df_excel.iterrows():
+                    non_empty = [
+                        str(value).strip()
+                        for value in row
+                        if pd.notna(value) and str(value).strip()
+                    ]
+                    if non_empty and non_empty[0].lower() == 'field':
+                        field_row_index = index
+                        break
+
+                if field_row_index is None or field_row_index + 1 >= len(df_excel):
+                    raise ValueError(
+                        'Could not locate field row and following value row'
+                    )
+
+                field_row = df_excel.iloc[field_row_index]
+                value_row = df_excel.iloc[field_row_index + 1]
+                values = {
+                    str(field).strip(): value_row.iloc[column]
+                    for column, field in enumerate(field_row)
+                    if pd.notna(field) and str(field).strip().lower() != 'field'
+                }
+
+                settings = InstrumentSettings()
+                electronics_type = values.get('electronics_type')
+                if pd.notna(electronics_type):
+                    settings.electronics_type = str(electronics_type).strip()
+
+                distance = self._safe_float(values.get('distance_sample_to_screen_mm'))
+                if distance is not None:
+                    settings.chamber_geometry = ChamberGeometry(
+                        distance_sample_to_screen_mm=distance
+                    )
+
+                camera_values = {
+                    'image_length_calibration_mm_per_px': self._safe_float(
+                        values.get('image_length_calibration_mm_per_px')
+                    ),
+                    'resolution_x_px': self._safe_float(values.get('resolution_x_px')),
+                    'resolution_y_px': self._safe_float(values.get('resolution_y_px')),
+                }
+                if any(value is not None for value in camera_values.values()):
+                    settings.camera = Camera()
+                    calibration = camera_values['image_length_calibration_mm_per_px']
+                    if calibration is not None:
+                        settings.camera.image_length_calibration_mm_per_px = calibration
+                    if camera_values['resolution_x_px'] is not None:
+                        settings.camera.resolution_x_px = int(
+                            camera_values['resolution_x_px']
+                        )
+                    if camera_values['resolution_y_px'] is not None:
+                        settings.camera.resolution_y_px = int(
+                            camera_values['resolution_y_px']
+                        )
+
+                self.instrument_settings = settings
+                offset = self._safe_float(values.get('sample_phi_holder_alpha_deg'))
+                if offset is not None:
+                    self.sample_phi_holder_alpha_deg = offset
             except Exception as e:
                 if logger:
                     logger.warning(f'Could not parse Excel settings: {e}')
@@ -311,7 +376,44 @@ class RHEEDMeasurement(Measurement, EntryData):
         rot_path = os.path.join(mainfile_dir, 'Rotation.txt')
         if os.path.exists(rot_path):
             try:
-                return pd.read_csv(rot_path, sep=r'\s+|,', engine='python')
+                with open(rot_path, encoding='utf-8-sig') as rotation_file:
+                    lines = rotation_file.readlines()
+
+                header_index = next(
+                    index
+                    for index, line in enumerate(lines[1:], start=1)
+                    if ',' in line
+                )
+                header = next(csv.reader([lines[header_index].lstrip("'").strip()]))
+                header_column_count = 3
+                if len(header) != header_column_count:
+                    raise ValueError('Rotation header must contain three columns')
+
+                records = []
+                for line in lines[header_index + 1 :]:
+                    if not line.strip():
+                        continue
+                    parts = line.split()
+                    data_column_count = 4
+                    if len(parts) != data_column_count:
+                        raise ValueError(f'Invalid rotation data row: {line.strip()}')
+                    parsed_datetime = datetime.strptime(
+                        f'{parts[0]} {parts[1]}', '%d/%m/%Y %H:%M:%S.%f'
+                    )
+                    records.append(
+                        {
+                            'date': parts[0],
+                            'time': parts[1],
+                            'steps': int(parts[2]),
+                            'parsed_datetime': parsed_datetime,
+                            'alpha': float(parts[3]),
+                        }
+                    )
+
+                return pd.DataFrame.from_records(
+                    records,
+                    columns=['date', 'time', 'steps', 'parsed_datetime', 'alpha'],
+                )
             except Exception as e:
                 if logger:
                     logger.warning(f'Could not parse rotation log: {e}')
@@ -321,8 +423,9 @@ class RHEEDMeasurement(Measurement, EntryData):
         """Maps files that are explicitly named in the CSV rows (like video links)."""
         assigned_files = set()
         for _, row in df_meta.iterrows():
-            fname = str(row.get('file_name', '')).strip()
-            if fname and fname != 'nan':
+            source_name = str(row.get('file_name', '')).strip()
+            if source_name and source_name != 'nan':
+                fname = os.path.basename(source_name.replace('\\', '/'))
                 assigned_files.add(fname)
                 result = self._create_result_instance(fname, all_files)
                 if not result:
@@ -361,7 +464,7 @@ class RHEEDMeasurement(Measurement, EntryData):
             result.datetime = file_dt.isoformat()
 
             self._match_unassigned_metadata(result, file_dt, df_meta)
-            self._match_unassigned_rotation(result, file_dt, df_rot)
+            # Rotation assignment remains disabled until its selection policy is approved.
 
             self.results.append(result)
 
@@ -391,20 +494,31 @@ class RHEEDMeasurement(Measurement, EntryData):
 
     def _create_result_instance(self, fname, all_files):
         """Instantiates the correct schema SubSection (Image, Video, or Point Scan) based on file extension."""
+        fname = os.path.basename(str(fname).replace('\\', '/'))
         if fname.endswith(('.tif', '.pgm')):
             res = RHEEDImageResult()
+            res.name = fname
+            res.result_type = 'image'
             if fname in all_files:
                 res.images = [fname]
             return res
         elif fname.endswith(('.asc', '.csv')) and 'sensor' not in fname.lower():
-            return RHEEDPointScanResult()
+            res = RHEEDPointScanResult()
+            res.name = fname
+            res.result_type = 'scan_point'
+            return res
         elif fname.endswith('.dst'):
-            return RHEEDVideoResult()
+            res = RHEEDVideoResult()
+            res.name = fname
+            res.result_type = 'video'
+            return res
         return None
 
     # --- REFACTORED SCHEMA MAPPING LOGIC ---
     def _safe_float(self, val):
         """Safely converts string values to floats, returning None instead of crashing on empty cells."""
+        if pd.isna(val):
+            return None
         try:
             return float(val)
         except (ValueError, TypeError):
@@ -451,9 +565,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         """Extracts sample ID, orientation, and compound details from a CSV row."""
         sample = Sample()
         m8_val = str(row.get('m8_id', ''))
-        if '_' in m8_val:
-            sample.sample_id = m8_val.split('_', maxsplit=1)[0]
-        elif m8_val and m8_val != 'nan':
+        if m8_val and m8_val != 'nan':
             sample.sample_id = m8_val
 
         if pd.notna(row.get('azimuth')):
@@ -476,7 +588,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         holder = SubstrateHolder()
         m8_val = str(row.get('m8_id', ''))
         if '_' in m8_val:
-            holder.position_measured = m8_val.split('_')[1]
+            holder.position_measured = m8_val.split('_', maxsplit=1)[1]
 
         alpha = self._safe_float(row.get('mani_angle'))
         if alpha is not None:
@@ -512,9 +624,23 @@ class RHEEDMeasurement(Measurement, EntryData):
     def _create_deflection_from_row(self, row):
         """Extracts beam deflection and alignment settings."""
         deflect = DeflectionUnitFUG()
-        x_al = self._safe_float(row.get('x_align'))
-        if x_al is not None:
-            deflect.alignment_x = x_al
+        field_map = {
+            'x_align': 'alignment_x',
+            'y_align': 'alignment_y',
+            'magnetic_lense': 'magnet_lens',
+            'x_coarse': 'beam_deflection_x_coarse',
+            'x_fine': 'beam_deflection_x_fine',
+            'x_crossp': 'beam_deflection_x_crosspoint',
+            'x_angle': 'beam_deflection_x_angle',
+            'y_coarse': 'beam_deflection_y_coarse',
+            'y_fine': 'beam_deflection_y_fine',
+            'y_crossp': 'beam_deflection_y_crosspoint',
+            'y_angle': 'beam_deflection_y_angle',
+        }
+        for csv_field, schema_field in field_map.items():
+            value = self._safe_float(row.get(csv_field))
+            if value is not None:
+                setattr(deflect, schema_field, value)
         return deflect
 
 
