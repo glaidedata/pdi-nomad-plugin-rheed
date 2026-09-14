@@ -1,13 +1,16 @@
 import csv
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 from nomad.datamodel import EntryArchive, EntryMetadata
 from nomad.utils import get_logger
 from openpyxl import Workbook
 
-from pdi_nomad_plugin_rheed.schema_packages.schema_package import RHEEDMeasurement
+from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
+    RHEEDMeasurement,
+    RHEEDPointScanResult,
+)
 
 
 def _write_synthetic_inputs(tmp_path):
@@ -67,12 +70,10 @@ def _write_synthetic_inputs(tmp_path):
             'comments': 'invented image',
         },
         {
-            'file_path': 'Z:\\Synthetic\\sweep.asc',
-            'file_name': 'nested/sweep.asc',
-            'm8_id': 'nova_E',
+            'm8_id': 'scan_B',
             'date': '2042-05-06',
-            'time': '07-08-11.789',
-            'comments': 'invented scan shell',
+            'time': '07-08-09.500',
+            'comments': 'invented scan metadata',
         },
     ]
     with metadata_path.open('w', encoding='utf-8', newline='') as metadata_file:
@@ -81,6 +82,14 @@ def _write_synthetic_inputs(tmp_path):
         writer.writerows(rows)
 
     (tmp_path / 'crystal_image.tif').write_bytes(b'synthetic image bytes')
+    (tmp_path / 'sweep.asc').write_text(
+        'Recorded at 2042-05-06   07:08:09.500\n'
+        'Time [s] Sensor A Sensor B\n'
+        '71001 71002\n\n'
+        '-0.000 1.5 2.5\n'
+        '1.000 3.5 4.5\n',
+        encoding='utf-8',
+    )
 
     workbook = Workbook()
     settings_sheet = workbook.active
@@ -171,10 +180,23 @@ def test_schema_extraction_normalization(tmp_path):
     assert video.substrate_holder.position_measured == 'C'
     assert image.sample.sample_id == 'nova_D'
     assert image.substrate_holder.position_measured == 'D'
-    assert scan.sample.sample_id == 'nova_E'
-    assert scan.substrate_holder.position_measured == 'E'
+    assert scan.sample.sample_id == 'scan_B'
+    assert scan.substrate_holder.position_measured == 'B'
     assert image.images == ['crystal_image.tif']
     assert video.measurement_settings.e_gun_FUG.electron_energy_keV == 21.75  # noqa: PLR2004
+    assert len(scan.point_scans) == 1
+    point_scan = scan.point_scans[0]
+    assert point_scan.source_file == 'sweep.asc'
+    assert point_scan.start_time == datetime(2042, 5, 6, 7, 8, 9, 500000, tzinfo=UTC)
+    assert point_scan.end_time == datetime(2042, 5, 6, 7, 8, 10, 500000, tzinfo=UTC)
+    assert [sensor.sensor_name for sensor in point_scan.sensors] == [
+        'Sensor A',
+        'Sensor B',
+    ]
+    assert [sensor.sensor_id for sensor in point_scan.sensors] == [71001, 71002]
+    assert list(point_scan.sensors[0].relative_time.magnitude) == [0.0, 1.0]
+    assert list(point_scan.sensors[0].intensity) == [1.5, 3.5]
+    assert list(point_scan.sensors[1].intensity) == [2.5, 4.5]
 
 
 def test_maps_all_fug_deflection_fields_and_preserves_missing_values(tmp_path):
@@ -229,3 +251,90 @@ def test_parses_rotation_log_without_automatic_assignment(tmp_path):
         result for result in normalized.results if result.name == unindexed_name
     )
     assert unindexed_result.substrate_holder.rotation_angle_alpha_deg is None
+
+
+def test_discovers_timestamped_tiff_and_pgm_files(tmp_path):
+    _write_synthetic_inputs(tmp_path)
+    tiff_name = 'unindexed_2042-05-06___07-08-12.500.tif'
+    pgm_name = 'unindexed_2042-05-06___07-08-13.500.pgm'
+    (tmp_path / tiff_name).write_bytes(b'synthetic unindexed tiff bytes')
+    (tmp_path / pgm_name).write_text('P2\n1 1\n255\n7\n', encoding='ascii')
+
+    normalized = _normalize_synthetic_measurement(tmp_path)
+    discovered = {
+        result.name: result.result_type
+        for result in normalized.results
+        if result.name in {tiff_name, pgm_name}
+    }
+
+    assert discovered == {tiff_name: 'image', pgm_name: 'image'}
+
+
+def test_scan_metadata_priority(tmp_path):
+    measurement = RHEEDMeasurement()
+
+    def match_sample_id(rows, start_time, end_time):
+        metadata_path = tmp_path / 'association.csv'
+        with metadata_path.open('w', encoding='utf-8', newline='') as metadata_file:
+            writer = csv.DictWriter(metadata_file, fieldnames=['m8_id', 'date', 'time'])
+            writer.writeheader()
+            writer.writerows(rows)
+
+        result = RHEEDPointScanResult()
+        measurement._match_scan_metadata(
+            result,
+            start_time,
+            end_time,
+            measurement._load_and_prep_csv(metadata_path),
+        )
+        return result.sample.sample_id
+
+    scan_start = datetime(2042, 5, 6, 7, 8, 20)
+    scan_end = datetime(2042, 5, 6, 7, 8, 25)
+    assert (
+        match_sample_id(
+            [
+                {'m8_id': 'before_A', 'date': '2042-05-06', 'time': '07-08-19.000'},
+                {'m8_id': 'exact_B', 'date': '2042-05-06', 'time': '07-08-20.000'},
+                {'m8_id': 'during_C', 'date': '2042-05-06', 'time': '07-08-21.000'},
+            ],
+            scan_start,
+            scan_end,
+        )
+        == 'exact_B'
+    )
+    assert (
+        match_sample_id(
+            [
+                {'m8_id': 'before_A', 'date': '2042-05-06', 'time': '07-08-19.000'},
+                {'m8_id': 'during_B', 'date': '2042-05-06', 'time': '07-08-21.000'},
+                {'m8_id': 'during_C', 'date': '2042-05-06', 'time': '07-08-22.000'},
+            ],
+            scan_start,
+            scan_end,
+        )
+        == 'during_B'
+    )
+    assert (
+        match_sample_id(
+            [
+                {'m8_id': 'before_A', 'date': '2042-05-06', 'time': '07-08-18.000'},
+                {'m8_id': 'before_B', 'date': '2042-05-06', 'time': '07-08-19.000'},
+                {'m8_id': 'after_C', 'date': '2042-05-06', 'time': '07-08-26.000'},
+            ],
+            scan_start,
+            scan_end,
+        )
+        == 'before_B'
+    )
+    assert (
+        match_sample_id(
+            [
+                {'m8_id': 'after_A', 'date': '2042-05-06', 'time': '07-08-26.000'},
+                {'m8_id': 'after_B', 'date': '2042-05-06', 'time': '07-08-27.000'},
+            ],
+            scan_start,
+            scan_end,
+        )
+        == 'after_A'
+    )

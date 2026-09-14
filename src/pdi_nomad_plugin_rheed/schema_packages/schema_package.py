@@ -1,7 +1,7 @@
 import csv
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 from nomad.datamodel.data import ArchiveSection, EntryData
@@ -193,10 +193,18 @@ class RHEEDImageResult(RHEEDResult):
     )
 
 
+class RHEEDSensor(ArchiveSection):
+    sensor_name = Quantity(type=str)
+    sensor_id = Quantity(type=int)
+    relative_time = Quantity(type=float, shape=['*'], unit='second')
+    intensity = Quantity(type=float, shape=['*'])
+
+
 class PointScan(ArchiveSection):
     source_file = Quantity(type=str, a_browser=dict(adaptor='RawFileAdaptor'))
     start_time = Quantity(type=Datetime)
     end_time = Quantity(type=Datetime)
+    sensors = SubSection(section_def=RHEEDSensor, repeats=True)
     sensor_position_overview_picture = Quantity(
         type=str, a_browser=dict(adaptor='RawFileAdaptor')
     )
@@ -272,10 +280,12 @@ class RHEEDMeasurement(Measurement, EntryData):
         """Master controller that orchestrates reading all files and mapping the data."""
         df_meta = self._load_and_prep_csv(mainfile_path)
         self._parse_excel_settings(mainfile_dir, all_files, logger)
-        df_rot = self._parse_rotation_log(mainfile_dir, logger)
+        self._parse_rotation_log(mainfile_dir, logger)
 
         assigned_files = self._process_explicit_files(df_meta, all_files)
-        self._process_unassigned_files(df_meta, df_rot, all_files, assigned_files)
+        self._process_unassigned_files(
+            df_meta, mainfile_dir, all_files, assigned_files, logger
+        )
 
     def _load_and_prep_csv(self, mainfile_path):
         """Reads the master CSV and formats the timestamp columns for easy matching."""
@@ -440,16 +450,32 @@ class RHEEDMeasurement(Measurement, EntryData):
                 self.results.append(result)
         return assigned_files
 
-    def _process_unassigned_files(self, df_meta, df_rot, all_files, assigned_files):
-        """Scans the upload folder for images and matches them to CSV rows based on their timestamp."""
+    def _process_unassigned_files(
+        self, df_meta, mainfile_dir, all_files, assigned_files, logger
+    ):
+        """Scans the upload folder for supported files not named by CSV rows."""
         time_pattern = re.compile(r'(\d{4}-\d{2}-\d{2}___\d{2}-\d{2}-\d{2}\.\d{3})')
         unassigned = [
             f
             for f in all_files
-            if f not in assigned_files and f.endswith(('.tif', '.pgm', '.asc', '.csv'))
+            if f not in assigned_files and f.endswith(('.tif', '.pgm', '.asc'))
         ]
 
         for fname in unassigned:
+            if fname.endswith('.asc'):
+                result = self._create_result_instance(fname, all_files)
+                point_scan, start_time, end_time = self._parse_point_scan(
+                    os.path.join(mainfile_dir, fname), logger
+                )
+                if point_scan is None:
+                    continue
+
+                result.point_scans.append(point_scan)
+                result.datetime = start_time.isoformat()
+                self._match_scan_metadata(result, start_time, end_time, df_meta)
+                self.results.append(result)
+                continue
+
             match = time_pattern.search(fname)
             if not match:
                 continue
@@ -467,6 +493,138 @@ class RHEEDMeasurement(Measurement, EntryData):
             # Rotation assignment remains disabled until its selection policy is approved.
 
             self.results.append(result)
+
+    def _parse_point_scan(self, fname, logger):  # noqa: PLR0911, PLR0912
+        """Read an ASC point scan and return its parsed data and observed interval."""
+        try:
+            with open(fname, encoding='utf-8-sig') as scan_file:
+                lines = scan_file.readlines()
+        except OSError as error:
+            if logger:
+                logger.warning(f'Could not read point scan {fname}: {error}')
+            return None, None, None
+
+        minimum_header_lines = 4
+        if len(lines) < minimum_header_lines:
+            if logger:
+                logger.warning(f'Point scan {fname} is missing its header lines')
+            return None, None, None
+
+        timestamp_match = re.match(
+            r'^Recorded at\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}\.\d+)',
+            lines[0].strip(),
+        )
+        if not timestamp_match:
+            if logger:
+                logger.warning(f'Point scan {fname} has no valid Recorded at timestamp')
+            return None, None, None
+
+        try:
+            start_time = datetime.strptime(
+                f'{timestamp_match.group(1)} {timestamp_match.group(2)}',
+                '%Y-%m-%d %H:%M:%S.%f',
+            )
+        except ValueError:
+            if logger:
+                logger.warning(
+                    f'Point scan {fname} has an invalid Recorded at timestamp'
+                )
+            return None, None, None
+
+        sensor_names = re.findall(r'Sensor\s+\S+', lines[1])
+        sensor_ids = [int(value) for value in re.findall(r'\d+', lines[2])]
+        if not sensor_names or len(sensor_names) != len(sensor_ids):
+            if logger:
+                logger.warning(
+                    f'Point scan {fname} has mismatched sensor labels and IDs'
+                )
+            return None, None, None
+
+        data_start = next(
+            (
+                index + 1
+                for index, line in enumerate(lines[3:], start=3)
+                if not line.strip()
+            ),
+            len(lines),
+        )
+        rows = []
+        for line in lines[data_start:]:
+            if not line.strip():
+                continue
+            try:
+                row = [float(value) for value in line.split()]
+            except ValueError:
+                if logger:
+                    logger.warning(f'Point scan {fname} has a non-numeric data row')
+                return None, None, None
+            if len(row) != len(sensor_names) + 1:
+                if logger:
+                    logger.warning(f'Point scan {fname} has an incomplete data row')
+                return None, None, None
+            rows.append(row)
+
+        if not rows:
+            if logger:
+                logger.warning(f'Point scan {fname} has no numeric data rows')
+            return None, None, None
+
+        point_scan = PointScan(
+            source_file=os.path.basename(fname), start_time=start_time.isoformat()
+        )
+        relative_time = [row[0] for row in rows]
+        point_scan.end_time = (
+            start_time + timedelta(seconds=relative_time[-1])
+        ).isoformat()
+        for index, (sensor_name, sensor_id) in enumerate(
+            zip(sensor_names, sensor_ids, strict=True)
+        ):
+            point_scan.sensors.append(
+                RHEEDSensor(
+                    sensor_name=sensor_name,
+                    sensor_id=sensor_id,
+                    relative_time=relative_time,
+                    intensity=[row[index + 1] for row in rows],
+                )
+            )
+        return point_scan, start_time, start_time + timedelta(seconds=relative_time[-1])
+
+    def _match_scan_metadata(self, result, start_time, end_time, df_meta):
+        """Apply the documented metadata priority to a point-scan interval."""
+        if 'parsed_datetime' not in df_meta.columns:
+            return
+
+        candidates = df_meta.dropna(subset=['parsed_datetime'])
+        exact = candidates[candidates['parsed_datetime'] == start_time]
+        if not exact.empty:
+            self._populate_schema_from_row(result, exact.iloc[0])
+            return
+
+        during = candidates[
+            (candidates['parsed_datetime'] > start_time)
+            & (candidates['parsed_datetime'] <= end_time)
+        ]
+        if not during.empty:
+            self._populate_schema_from_row(
+                result, during.sort_values('parsed_datetime', kind='stable').iloc[0]
+            )
+            return
+
+        before = candidates[candidates['parsed_datetime'] < start_time]
+        if not before.empty:
+            self._populate_schema_from_row(
+                result,
+                before.sort_values(
+                    'parsed_datetime', ascending=False, kind='stable'
+                ).iloc[0],
+            )
+            return
+
+        after = candidates[candidates['parsed_datetime'] > end_time]
+        if not after.empty:
+            self._populate_schema_from_row(
+                result, after.sort_values('parsed_datetime', kind='stable').iloc[0]
+            )
 
     def _match_unassigned_metadata(self, result, file_dt, df_meta):
         """Finds the closest preceding CSV log entry for a given image's timestamp."""
