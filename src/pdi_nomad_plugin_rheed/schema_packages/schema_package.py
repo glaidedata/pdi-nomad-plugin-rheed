@@ -3,10 +3,13 @@ import os
 import re
 from datetime import datetime, timedelta
 
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 from nomad.datamodel.data import ArchiveSection, EntryData
 from nomad.datamodel.metainfo.annotations import ELNComponentEnum
 from nomad.datamodel.metainfo.basesections import Measurement, MeasurementResult
+from nomad.datamodel.metainfo.plot import PlotlyFigure, PlotSection
 from nomad.metainfo import (
     Datetime,
     File,
@@ -16,6 +19,7 @@ from nomad.metainfo import (
     Section,
     SubSection,
 )
+from PIL import Image
 
 m_package = SchemaPackage()
 
@@ -194,8 +198,13 @@ class RHEEDVideoResult(RHEEDResult):
     number_of_frames = Quantity(type=int, a_eln=dict(component='NumberEditQuantity'))
 
 
+class RHEEDPlot(PlotSection):
+    """Container for a NOMAD Plotly figure."""
+
+
 class RHEEDImageResult(RHEEDResult):
-    images = Quantity(type=File, shape=['*'], a_browser=dict(adaptor='RawFileAdaptor'))
+    images = Quantity(type=File, a_browser=dict(adaptor='RawFileAdaptor'))
+    plot = SubSection(section_def=RHEEDPlot)
     derived_from_video_link = Quantity(
         type=str, a_eln=dict(component='StringEditQuantity')
     )
@@ -291,7 +300,9 @@ class RHEEDMeasurement(Measurement, EntryData):
         self._parse_rotation_log(mainfile_dir, logger)
         self._set_color_table(all_files)
 
-        assigned_files = self._process_explicit_files(df_meta, all_files)
+        assigned_files = self._process_explicit_files(
+            df_meta, mainfile_dir, all_files, logger
+        )
         self._process_unassigned_files(
             df_meta, mainfile_dir, all_files, assigned_files, logger
         )
@@ -438,7 +449,7 @@ class RHEEDMeasurement(Measurement, EntryData):
                     logger.warning(f'Could not parse rotation log: {e}')
         return None
 
-    def _process_explicit_files(self, df_meta, all_files):
+    def _process_explicit_files(self, df_meta, mainfile_dir, all_files, logger):
         """Maps files that are explicitly named in the CSV rows (like video links)."""
         assigned_files = set()
         for _, row in df_meta.iterrows():
@@ -457,6 +468,7 @@ class RHEEDMeasurement(Measurement, EntryData):
 
                 self._populate_schema_from_row(result, row)
                 self.results.append(result)
+                self._populate_image_plot(result, mainfile_dir, fname, logger)
         return assigned_files
 
     def _process_unassigned_files(
@@ -505,6 +517,59 @@ class RHEEDMeasurement(Measurement, EntryData):
             # Rotation assignment remains disabled until its selection policy is approved.
 
             self.results.append(result)
+            self._populate_image_plot(result, mainfile_dir, fname, logger)
+
+    def _populate_image_plot(self, result, mainfile_dir, fname, logger):
+        """Store a TIFF image or PGM intensity array in a Plotly figure."""
+        if not isinstance(result, RHEEDImageResult):
+            return
+
+        try:
+            image_path = os.path.join(mainfile_dir, fname)
+            if fname.lower().endswith('.pgm'):
+                trace = go.Heatmap(z=self._read_ascii_pgm(image_path))
+            elif fname.lower().endswith(('.tif', '.tiff')):
+                trace = go.Image(z=self._read_tiff_array(image_path))
+            else:
+                return
+
+            result.plot = RHEEDPlot()
+            result.plot.figures.append(
+                PlotlyFigure(
+                    label='RHEED image',
+                    figure=go.Figure(data=[trace]).to_plotly_json(),
+                )
+            )
+        except Exception as error:
+            if logger:
+                logger.warning(f'Could not create image preview for {fname}: {error}')
+
+    def _read_tiff_array(self, image_path):
+        """Read TIFF RGB data without changing its shape or pixel values."""
+        with Image.open(image_path) as image:
+            return np.asarray(image)
+
+    def _read_ascii_pgm(self, image_path):
+        """Read an ASCII P2 PGM while retaining values above its declared maximum."""
+        with open(image_path, encoding='ascii') as pgm_file:
+            tokens = []
+            for line in pgm_file:
+                tokens.extend(line.split('#', maxsplit=1)[0].split())
+
+        header_token_count = 4
+        if len(tokens) < header_token_count or tokens[0] != 'P2':
+            raise ValueError('Expected an ASCII P2 PGM header')
+
+        width, height, declared_maximum = (
+            int(value) for value in tokens[1:header_token_count]
+        )
+        if width <= 0 or height <= 0 or declared_maximum <= 0:
+            raise ValueError('PGM dimensions and declared maximum must be positive')
+
+        values = [int(value) for value in tokens[header_token_count:]]
+        if len(values) != width * height:
+            raise ValueError('PGM pixel count does not match its dimensions')
+        return np.asarray(values).reshape(height, width)
 
     def _set_color_table(self, all_files):
         """Link the first available color table without interpreting its LUT values."""
@@ -732,7 +797,7 @@ class RHEEDMeasurement(Measurement, EntryData):
             res.name = fname
             res.result_type = 'image'
             if fname in all_files:
-                res.images = [fname]
+                res.images = fname
             return res
         elif fname.endswith(('.asc', '.csv')) and 'sensor' not in fname.lower():
             res = RHEEDPointScanResult()

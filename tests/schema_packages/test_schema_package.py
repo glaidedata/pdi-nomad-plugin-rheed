@@ -3,10 +3,12 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
+import numpy as np
 from nomad.datamodel import EntryArchive, EntryMetadata
 from nomad.metainfo import File
 from nomad.utils import get_logger
 from openpyxl import Workbook
+from PIL import Image
 
 from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
     PointScan,
@@ -151,13 +153,21 @@ def _write_synthetic_inputs(tmp_path):
     return metadata_path
 
 
-def _normalize_synthetic_measurement(tmp_path):
+def _normalize_synthetic_measurement(tmp_path, prepare_files=None):
     metadata_path = _write_synthetic_inputs(tmp_path)
+    if prepare_files:
+        prepare_files(tmp_path)
     archive = EntryArchive()
-    archive.metadata = EntryMetadata(entry_name='synthetic_rheed_entry')
+    archive.metadata = EntryMetadata(
+        entry_name='synthetic_rheed_entry',
+        upload_id='synthetic-upload',
+        entry_id='synthetic-entry',
+    )
     measurement = RHEEDMeasurement(data_file=str(metadata_path))
     archive.data = measurement
     archive.m_context = MagicMock()
+    archive.m_context.upload_id = 'synthetic-upload'
+    archive.m_context._get_ids.return_value = ('synthetic-upload', 'synthetic-entry')
     archive.m_context.normalize_reference.side_effect = lambda section, value: value
 
     @contextmanager
@@ -194,7 +204,7 @@ def test_schema_extraction_normalization(tmp_path):
     assert image.substrate_holder.position_measured == 'D'
     assert scan.sample.sample_id == 'scan_B'
     assert scan.substrate_holder.position_measured == 'B'
-    assert image.images == ['crystal_image.tif']
+    assert image.images == 'crystal_image.tif'
     assert video.measurement_settings.e_gun_FUG.electron_energy_keV == 21.75  # noqa: PLR2004
     assert len(scan.point_scans) == 1
     point_scan = scan.point_scans[0]
@@ -258,7 +268,7 @@ def test_raw_file_quantities_use_nomad_file_references(tmp_path):
     )
     assert isinstance(RHEEDMeasurement.m_def.all_quantities['color_table'].type, File)
 
-    assert image.m_to_dict()['images'] == ['crystal_image.tif']
+    assert image.m_to_dict()['images'] == 'crystal_image.tif'
     assert point_scan.m_to_dict()['source_file'] == 'sweep.asc'
     assert (
         point_scan.m_to_dict()['sensor_definition_file']
@@ -269,6 +279,44 @@ def test_raw_file_quantities_use_nomad_file_references(tmp_path):
         == 'sensor_overview_2042-05-06___07-08-09.750.tif'
     )
     assert measurement.m_to_dict()['color_table'] == 'color_scale.col'
+
+
+def test_stores_tiff_and_pgm_plotly_previews_with_raw_references(
+    tmp_path,
+):
+    tiff_values = np.array(
+        [
+            [[1, 2, 3], [4, 5, 6]],
+            [[7, 8, 9], [10, 11, 12]],
+        ],
+        dtype=np.uint8,
+    )
+    pgm_name = 'snapshot_2042-05-06___07-08-13.500.pgm'
+
+    def prepare_files(directory):
+        Image.fromarray(tiff_values).save(directory / 'crystal_image.tif')
+        (directory / pgm_name).write_text('P2\n2 2\n10\n1 12\n3 4\n', encoding='ascii')
+
+    measurement = _normalize_synthetic_measurement(tmp_path, prepare_files)
+
+    results_by_name = {result.name: result for result in measurement.results}
+    tiff_result = results_by_name['crystal_image.tif']
+    pgm_result = results_by_name[pgm_name]
+
+    assert tiff_result.images == 'crystal_image.tif'
+    assert pgm_result.images == pgm_name
+    assert tiff_result.plot is not None
+    assert pgm_result.plot is not None
+    assert len(tiff_result.plot.figures) == 1
+    assert len(pgm_result.plot.figures) == 1
+    tiff_figure = tiff_result.plot.figures[0].figure
+    pgm_figure = pgm_result.plot.figures[0].figure
+    assert tiff_figure['data'][0]['type'] == 'image'
+    assert np.array_equal(np.asarray(tiff_figure['data'][0]['z']), tiff_values)
+    assert pgm_figure['data'][0]['type'] == 'heatmap'
+    assert np.array_equal(
+        np.asarray(pgm_figure['data'][0]['z']), np.array([[1, 12], [3, 4]])
+    )
 
 
 def test_parses_global_rheed_settings_from_excel(tmp_path):
