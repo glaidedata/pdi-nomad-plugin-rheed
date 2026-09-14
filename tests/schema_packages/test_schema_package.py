@@ -4,10 +4,13 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 from nomad.datamodel import EntryArchive, EntryMetadata
+from nomad.metainfo import File
 from nomad.utils import get_logger
 from openpyxl import Workbook
 
 from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
+    PointScan,
+    RHEEDImageResult,
     RHEEDMeasurement,
     RHEEDPointScanResult,
 )
@@ -155,6 +158,7 @@ def _normalize_synthetic_measurement(tmp_path):
     measurement = RHEEDMeasurement(data_file=str(metadata_path))
     archive.data = measurement
     archive.m_context = MagicMock()
+    archive.m_context.normalize_reference.side_effect = lambda section, value: value
 
     @contextmanager
     def mock_raw_file(filename, mode):
@@ -231,6 +235,40 @@ def test_maps_all_fug_deflection_fields_and_preserves_missing_values(tmp_path):
 
     missing = measurement.results[1].measurement_settings.deflection_unit_FUG
     assert missing.m_to_dict() == {}
+
+
+def test_raw_file_quantities_use_nomad_file_references(tmp_path):
+    measurement = _normalize_synthetic_measurement(tmp_path)
+    results_by_name = {result.name: result for result in measurement.results}
+    image = results_by_name['crystal_image.tif']
+    point_scan = results_by_name['sweep.asc'].point_scans[0]
+
+    assert (
+        RHEEDMeasurement.m_def.all_quantities['data_file'].type.standard_type() == 'str'
+    )
+    assert not isinstance(RHEEDMeasurement.m_def.all_quantities['data_file'].type, File)
+    assert isinstance(RHEEDImageResult.m_def.all_quantities['images'].type, File)
+    assert isinstance(PointScan.m_def.all_quantities['source_file'].type, File)
+    assert isinstance(
+        PointScan.m_def.all_quantities['sensor_definition_file'].type, File
+    )
+    assert isinstance(
+        PointScan.m_def.all_quantities['sensor_position_overview_picture'].type,
+        File,
+    )
+    assert isinstance(RHEEDMeasurement.m_def.all_quantities['color_table'].type, File)
+
+    assert image.m_to_dict()['images'] == ['crystal_image.tif']
+    assert point_scan.m_to_dict()['source_file'] == 'sweep.asc'
+    assert (
+        point_scan.m_to_dict()['sensor_definition_file']
+        == 'sensors_2042-05-06___07-08-08.000.sn'
+    )
+    assert (
+        point_scan.m_to_dict()['sensor_position_overview_picture']
+        == 'sensor_overview_2042-05-06___07-08-09.750.tif'
+    )
+    assert measurement.m_to_dict()['color_table'] == 'color_scale.col'
 
 
 def test_parses_global_rheed_settings_from_excel(tmp_path):

@@ -7,7 +7,15 @@ import pandas as pd
 from nomad.datamodel.data import ArchiveSection, EntryData
 from nomad.datamodel.metainfo.annotations import ELNComponentEnum
 from nomad.datamodel.metainfo.basesections import Measurement, MeasurementResult
-from nomad.metainfo import Datetime, MEnum, Quantity, SchemaPackage, Section, SubSection
+from nomad.metainfo import (
+    Datetime,
+    File,
+    MEnum,
+    Quantity,
+    SchemaPackage,
+    Section,
+    SubSection,
+)
 
 m_package = SchemaPackage()
 
@@ -187,7 +195,7 @@ class RHEEDVideoResult(RHEEDResult):
 
 
 class RHEEDImageResult(RHEEDResult):
-    images = Quantity(type=str, shape=['*'], a_browser=dict(adaptor='RawFileAdaptor'))
+    images = Quantity(type=File, shape=['*'], a_browser=dict(adaptor='RawFileAdaptor'))
     derived_from_video_link = Quantity(
         type=str, a_eln=dict(component='StringEditQuantity')
     )
@@ -201,15 +209,15 @@ class RHEEDSensor(ArchiveSection):
 
 
 class PointScan(ArchiveSection):
-    source_file = Quantity(type=str, a_browser=dict(adaptor='RawFileAdaptor'))
+    source_file = Quantity(type=File, a_browser=dict(adaptor='RawFileAdaptor'))
     start_time = Quantity(type=Datetime)
     end_time = Quantity(type=Datetime)
     sensors = SubSection(section_def=RHEEDSensor, repeats=True)
     sensor_position_overview_picture = Quantity(
-        type=str, a_browser=dict(adaptor='RawFileAdaptor')
+        type=File, a_browser=dict(adaptor='RawFileAdaptor')
     )
     sensor_definition_file = Quantity(
-        type=str, a_browser=dict(adaptor='RawFileAdaptor')
+        type=File, a_browser=dict(adaptor='RawFileAdaptor')
     )
     derived_from_video_link = Quantity(type=str)
 
@@ -241,7 +249,7 @@ class RHEEDMeasurement(Measurement, EntryData):
     sample_ref = Quantity(
         type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity')
     )
-    color_table = Quantity(type=str, a_browser=dict(adaptor='RawFileAdaptor'))
+    color_table = Quantity(type=File, a_browser=dict(adaptor='RawFileAdaptor'))
 
     instrument_settings = SubSection(section_def=InstrumentSettings)
     results = SubSection(section_def=RHEEDResult, repeats=True)
