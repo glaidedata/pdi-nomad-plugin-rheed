@@ -90,6 +90,15 @@ def _write_synthetic_inputs(tmp_path):
         '1.000 3.5 4.5\n',
         encoding='utf-8',
     )
+    (tmp_path / 'sensors_2042-05-06___07-08-08.000.sn').write_text(
+        '[Sensor 0]\nType=Rect Area\n', encoding='utf-8'
+    )
+    (tmp_path / 'sensor_overview_2042-05-06___07-08-09.750.tif').write_bytes(
+        b'synthetic sensor overview bytes'
+    )
+    (tmp_path / 'color_scale.col').write_text(
+        '[Colors]\nGamma = 1.25\n', encoding='utf-8'
+    )
 
     workbook = Workbook()
     settings_sheet = workbook.active
@@ -163,19 +172,18 @@ def test_schema_extraction_normalization(tmp_path):
     measurement = _normalize_synthetic_measurement(tmp_path)
 
     assert measurement.measurement_id == 'RHD_nova'
-    assert len(measurement.results) == 3  # noqa: PLR2004
-    assert [result.name for result in measurement.results] == [
-        'orbit_capture.dst',
-        'crystal_image.tif',
-        'sweep.asc',
-    ]
-    assert [result.result_type for result in measurement.results] == [
-        'video',
-        'image',
-        'scan_point',
-    ]
+    assert len(measurement.results) == 4  # noqa: PLR2004
+    results_by_name = {result.name: result for result in measurement.results}
+    assert {name: result.result_type for name, result in results_by_name.items()} == {
+        'orbit_capture.dst': 'video',
+        'crystal_image.tif': 'image',
+        'sweep.asc': 'scan_point',
+        'sensor_overview_2042-05-06___07-08-09.750.tif': 'image',
+    }
 
-    video, image, scan = measurement.results
+    video = results_by_name['orbit_capture.dst']
+    image = results_by_name['crystal_image.tif']
+    scan = results_by_name['sweep.asc']
     assert video.sample.sample_id == 'nova_C'
     assert video.substrate_holder.position_measured == 'C'
     assert image.sample.sample_id == 'nova_D'
@@ -197,6 +205,12 @@ def test_schema_extraction_normalization(tmp_path):
     assert list(point_scan.sensors[0].relative_time.magnitude) == [0.0, 1.0]
     assert list(point_scan.sensors[0].intensity) == [1.5, 3.5]
     assert list(point_scan.sensors[1].intensity) == [2.5, 4.5]
+    assert point_scan.sensor_definition_file == 'sensors_2042-05-06___07-08-08.000.sn'
+    assert (
+        point_scan.sensor_position_overview_picture
+        == 'sensor_overview_2042-05-06___07-08-09.750.tif'
+    )
+    assert measurement.color_table == 'color_scale.col'
 
 
 def test_maps_all_fug_deflection_fields_and_preserves_missing_values(tmp_path):
@@ -337,4 +351,26 @@ def test_scan_metadata_priority(tmp_path):
             scan_end,
         )
         == 'after_A'
+    )
+
+
+def test_scan_auxiliary_priority(tmp_path):
+    start_time = datetime(2042, 5, 6, 7, 8, 20)
+    end_time = datetime(2042, 5, 6, 7, 8, 25)
+    exact_name = 'sensors_2042-05-06___07-08-20.000.sn'
+    during_name = 'sensors_2042-05-06___07-08-21.000.sn'
+    after_name = 'sensor_overview_2042-05-06___07-08-26.000.tif'
+    for filename in (exact_name, during_name, after_name):
+        (tmp_path / filename).write_text('synthetic auxiliary', encoding='utf-8')
+
+    measurement = RHEEDMeasurement()
+    assert (
+        measurement._select_scan_auxiliary(
+            [exact_name, during_name], start_time, end_time
+        )
+        == exact_name
+    )
+    assert (
+        measurement._select_scan_auxiliary([after_name], start_time, end_time)
+        == after_name
     )

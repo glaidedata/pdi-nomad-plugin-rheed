@@ -281,6 +281,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         df_meta = self._load_and_prep_csv(mainfile_path)
         self._parse_excel_settings(mainfile_dir, all_files, logger)
         self._parse_rotation_log(mainfile_dir, logger)
+        self._set_color_table(all_files)
 
         assigned_files = self._process_explicit_files(df_meta, all_files)
         self._process_unassigned_files(
@@ -470,6 +471,9 @@ class RHEEDMeasurement(Measurement, EntryData):
                 if point_scan is None:
                     continue
 
+                self._associate_scan_auxiliaries(
+                    point_scan, start_time, end_time, all_files
+                )
                 result.point_scans.append(point_scan)
                 result.datetime = start_time.isoformat()
                 self._match_scan_metadata(result, start_time, end_time, df_meta)
@@ -493,6 +497,68 @@ class RHEEDMeasurement(Measurement, EntryData):
             # Rotation assignment remains disabled until its selection policy is approved.
 
             self.results.append(result)
+
+    def _set_color_table(self, all_files):
+        """Link the first available color table without interpreting its LUT values."""
+        color_tables = sorted(f for f in all_files if f.lower().endswith('.col'))
+        if color_tables:
+            self.color_table = color_tables[0]
+
+    def _associate_scan_auxiliaries(self, point_scan, start_time, end_time, all_files):
+        """Link timestamped scan auxiliary files using scan-interval priority."""
+        sensor_definitions = [f for f in all_files if f.lower().endswith('.sn')]
+        overview_images = [
+            f for f in all_files if f.lower().endswith('.tif') and 'sensor' in f.lower()
+        ]
+        point_scan.sensor_definition_file = self._select_scan_auxiliary(
+            sensor_definitions, start_time, end_time
+        )
+        point_scan.sensor_position_overview_picture = self._select_scan_auxiliary(
+            overview_images, start_time, end_time
+        )
+
+    def _select_scan_auxiliary(self, filenames, start_time, end_time):
+        """Select a timestamped auxiliary by exact, during, before, then after."""
+        timestamp_pattern = re.compile(
+            r'(\d{4}-\d{2}-\d{2}___\d{2}-\d{2}-\d{2}\.\d{3})'
+        )
+        candidates = []
+        for filename in filenames:
+            match = timestamp_pattern.search(filename)
+            if not match:
+                continue
+            try:
+                timestamp = datetime.strptime(match.group(1), '%Y-%m-%d___%H-%M-%S.%f')
+            except ValueError:
+                continue
+            candidates.append((timestamp, filename))
+
+        candidates.sort(key=lambda candidate: (candidate[0], candidate[1]))
+        exact = [candidate for candidate in candidates if candidate[0] == start_time]
+        if exact:
+            return exact[0][1]
+
+        during = [
+            candidate
+            for candidate in candidates
+            if start_time < candidate[0] <= end_time
+        ]
+        if during:
+            return during[0][1]
+
+        before = [candidate for candidate in candidates if candidate[0] < start_time]
+        if before:
+            latest_timestamp = before[-1][0]
+            return next(
+                filename
+                for timestamp, filename in before
+                if timestamp == latest_timestamp
+            )
+
+        after = [candidate for candidate in candidates if candidate[0] > end_time]
+        if after:
+            return after[0][1]
+        return None
 
     def _parse_point_scan(self, fname, logger):  # noqa: PLR0911, PLR0912
         """Read an ASC point scan and return its parsed data and observed interval."""
