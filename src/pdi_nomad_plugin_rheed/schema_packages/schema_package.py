@@ -2,6 +2,7 @@ import csv
 import os
 import re
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ from nomad.metainfo import (
 from PIL import Image
 
 m_package = SchemaPackage()
+SOURCE_TIMEZONE = ZoneInfo('Europe/Berlin')
 
 
 # ---------------------------------------------------------
@@ -313,15 +315,37 @@ class RHEEDMeasurement(Measurement, EntryData):
         df_meta.columns = df_meta.columns.str.strip()
         if 'date' in df_meta.columns and 'time' in df_meta.columns:
             time_fixed = df_meta['time'].astype(str).str.replace('-', ':', regex=False)
-            df_meta['parsed_datetime'] = pd.to_datetime(
-                df_meta['date'].astype(str) + ' ' + time_fixed,
-                errors='coerce',
+            timestamp_strings = df_meta['date'].astype(str) + ' ' + time_fixed
+            df_meta['parsed_datetime'] = timestamp_strings.map(
+                self._parse_csv_source_datetime
             )
         if 'm8_id' in df_meta.columns:
             valid_ids = df_meta['m8_id'].dropna().astype(str)
             if not valid_ids.empty:
                 self.measurement_id = f'RHD_{valid_ids.iloc[0].split("_")[0]}'
         return df_meta
+
+    @staticmethod
+    def _parse_source_datetime(timestamp, formats):
+        """Interpret a RHEED wall-clock timestamp in the PDI Berlin timezone."""
+        for timestamp_format in formats:
+            try:
+                return datetime.strptime(timestamp, timestamp_format).replace(
+                    tzinfo=SOURCE_TIMEZONE
+                )
+            except ValueError:
+                continue
+        raise ValueError(f'Invalid RHEED timestamp: {timestamp}')
+
+    def _parse_csv_source_datetime(self, timestamp):
+        """Return a localized CSV timestamp or pandas' missing timestamp value."""
+        try:
+            return self._parse_source_datetime(
+                timestamp,
+                ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S'),
+            )
+        except ValueError:
+            return pd.NaT
 
     def _parse_excel_settings(  # noqa: PLR0912
         self, mainfile_dir, all_files, logger
@@ -427,8 +451,9 @@ class RHEEDMeasurement(Measurement, EntryData):
                     data_column_count = 4
                     if len(parts) != data_column_count:
                         raise ValueError(f'Invalid rotation data row: {line.strip()}')
-                    parsed_datetime = datetime.strptime(
-                        f'{parts[0]} {parts[1]}', '%d/%m/%Y %H:%M:%S.%f'
+                    parsed_datetime = self._parse_source_datetime(
+                        f'{parts[0]} {parts[1]}',
+                        ('%d/%m/%Y %H:%M:%S.%f', '%d/%m/%Y %H:%M:%S'),
                     )
                     records.append(
                         {
@@ -504,7 +529,9 @@ class RHEEDMeasurement(Measurement, EntryData):
             if not match:
                 continue
             try:
-                file_dt = datetime.strptime(match.group(1), '%Y-%m-%d___%H-%M-%S.%f')
+                file_dt = self._parse_source_datetime(
+                    match.group(1), ('%Y-%m-%d___%H-%M-%S.%f',)
+                )
             except ValueError:
                 continue
 
@@ -601,7 +628,9 @@ class RHEEDMeasurement(Measurement, EntryData):
             if not match:
                 continue
             try:
-                timestamp = datetime.strptime(match.group(1), '%Y-%m-%d___%H-%M-%S.%f')
+                timestamp = self._parse_source_datetime(
+                    match.group(1), ('%Y-%m-%d___%H-%M-%S.%f',)
+                )
             except ValueError:
                 continue
             candidates.append((timestamp, filename))
@@ -659,9 +688,9 @@ class RHEEDMeasurement(Measurement, EntryData):
             return None, None, None
 
         try:
-            start_time = datetime.strptime(
+            start_time = self._parse_source_datetime(
                 f'{timestamp_match.group(1)} {timestamp_match.group(2)}',
-                '%Y-%m-%d %H:%M:%S.%f',
+                ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S'),
             )
         except ValueError:
             if logger:

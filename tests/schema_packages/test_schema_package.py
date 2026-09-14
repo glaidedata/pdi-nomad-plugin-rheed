@@ -2,6 +2,7 @@ import csv
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import numpy as np
 from nomad.datamodel import EntryArchive, EntryMetadata
@@ -205,12 +206,13 @@ def test_schema_extraction_normalization(tmp_path):
     assert scan.sample.sample_id == 'scan_B'
     assert scan.substrate_holder.position_measured == 'B'
     assert image.images == 'crystal_image.tif'
+    assert image.datetime == datetime(2042, 5, 6, 5, 8, 10, 456000, tzinfo=UTC)
     assert video.measurement_settings.e_gun_FUG.electron_energy_keV == 21.75  # noqa: PLR2004
     assert len(scan.point_scans) == 1
     point_scan = scan.point_scans[0]
     assert point_scan.source_file == 'sweep.asc'
-    assert point_scan.start_time == datetime(2042, 5, 6, 7, 8, 9, 500000, tzinfo=UTC)
-    assert point_scan.end_time == datetime(2042, 5, 6, 7, 8, 10, 500000, tzinfo=UTC)
+    assert point_scan.start_time == datetime(2042, 5, 6, 5, 8, 9, 500000, tzinfo=UTC)
+    assert point_scan.end_time == datetime(2042, 5, 6, 5, 8, 10, 500000, tzinfo=UTC)
     assert [sensor.sensor_name for sensor in point_scan.sensors] == [
         'Sensor A',
         'Sensor B',
@@ -281,6 +283,31 @@ def test_raw_file_quantities_use_nomad_file_references(tmp_path):
     assert measurement.m_to_dict()['color_table'] == 'color_scale.col'
 
 
+def test_interprets_csv_source_times_as_berlin_wall_clock_times(tmp_path):
+    metadata_path = tmp_path / 'timestamps.csv'
+    with metadata_path.open('w', encoding='utf-8', newline='') as metadata_file:
+        writer = csv.DictWriter(metadata_file, fieldnames=['date', 'time'])
+        writer.writeheader()
+        writer.writerows(
+            [
+                {'date': '2042-01-15', 'time': '15-33-45.678'},
+                {'date': '2042-07-15', 'time': '15-33-45.678'},
+            ]
+        )
+
+    parsed = RHEEDMeasurement()._load_and_prep_csv(metadata_path)['parsed_datetime']
+    berlin = ZoneInfo('Europe/Berlin')
+
+    assert parsed.iloc[0] == datetime(2042, 1, 15, 15, 33, 45, 678000, tzinfo=berlin)
+    assert parsed.iloc[0].astimezone(UTC) == datetime(
+        2042, 1, 15, 14, 33, 45, 678000, tzinfo=UTC
+    )
+    assert parsed.iloc[1] == datetime(2042, 7, 15, 15, 33, 45, 678000, tzinfo=berlin)
+    assert parsed.iloc[1].astimezone(UTC) == datetime(
+        2042, 7, 15, 13, 33, 45, 678000, tzinfo=UTC
+    )
+
+
 def test_stores_tiff_and_pgm_plotly_previews_with_raw_references(
     tmp_path,
 ):
@@ -340,8 +367,8 @@ def test_parses_rotation_log_without_automatic_assignment(tmp_path):
     rotation = measurement._parse_rotation_log(tmp_path, get_logger(__name__))
 
     assert list(rotation['parsed_datetime']) == [
-        datetime(2042, 5, 6, 7, 8, 8, 500000),
-        datetime(2042, 5, 6, 7, 8, 10, 625000),
+        datetime(2042, 5, 6, 7, 8, 8, 500000, tzinfo=ZoneInfo('Europe/Berlin')),
+        datetime(2042, 5, 6, 7, 8, 10, 625000, tzinfo=ZoneInfo('Europe/Berlin')),
     ]
     assert list(rotation['steps']) == [901, 905]
     assert list(rotation['alpha']) == [12.75, 13.25]
@@ -362,12 +389,19 @@ def test_discovers_timestamped_tiff_and_pgm_files(tmp_path):
 
     normalized = _normalize_synthetic_measurement(tmp_path)
     discovered = {
-        result.name: result.result_type
+        result.name: result
         for result in normalized.results
         if result.name in {tiff_name, pgm_name}
     }
 
-    assert discovered == {tiff_name: 'image', pgm_name: 'image'}
+    assert {name: result.result_type for name, result in discovered.items()} == {
+        tiff_name: 'image',
+        pgm_name: 'image',
+    }
+    assert discovered[tiff_name].datetime == datetime(
+        2042, 5, 6, 5, 8, 12, 500000, tzinfo=UTC
+    )
+    assert discovered[tiff_name].sample.sample_id == 'nova_D'
 
 
 def test_scan_metadata_priority(tmp_path):
@@ -389,8 +423,8 @@ def test_scan_metadata_priority(tmp_path):
         )
         return result.sample.sample_id
 
-    scan_start = datetime(2042, 5, 6, 7, 8, 20)
-    scan_end = datetime(2042, 5, 6, 7, 8, 25)
+    scan_start = datetime(2042, 5, 6, 7, 8, 20, tzinfo=ZoneInfo('Europe/Berlin'))
+    scan_end = datetime(2042, 5, 6, 7, 8, 25, tzinfo=ZoneInfo('Europe/Berlin'))
     assert (
         match_sample_id(
             [
@@ -441,8 +475,8 @@ def test_scan_metadata_priority(tmp_path):
 
 
 def test_scan_auxiliary_priority(tmp_path):
-    start_time = datetime(2042, 5, 6, 7, 8, 20)
-    end_time = datetime(2042, 5, 6, 7, 8, 25)
+    start_time = datetime(2042, 5, 6, 7, 8, 20, tzinfo=ZoneInfo('Europe/Berlin'))
+    end_time = datetime(2042, 5, 6, 7, 8, 25, tzinfo=ZoneInfo('Europe/Berlin'))
     exact_name = 'sensors_2042-05-06___07-08-20.000.sn'
     during_name = 'sensors_2042-05-06___07-08-21.000.sn'
     after_name = 'sensor_overview_2042-05-06___07-08-26.000.tif'
