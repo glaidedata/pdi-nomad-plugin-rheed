@@ -358,7 +358,7 @@ def test_parses_global_rheed_settings_from_excel(tmp_path):
     assert measurement.sample_phi_holder_alpha_deg == 27.5  # noqa: PLR2004
 
 
-def test_parses_rotation_log_without_automatic_assignment(tmp_path):
+def test_parses_rotation_log_and_assigns_automatic_result(tmp_path):
     _write_synthetic_inputs(tmp_path)
     unindexed_name = 'unindexed_2042-05-06___07-08-12.500.tif'
     (tmp_path / unindexed_name).write_bytes(b'synthetic unindexed image bytes')
@@ -377,7 +377,134 @@ def test_parses_rotation_log_without_automatic_assignment(tmp_path):
     unindexed_result = next(
         result for result in normalized.results if result.name == unindexed_name
     )
-    assert unindexed_result.substrate_holder.rotation_angle_alpha_deg is None
+    assert unindexed_result.substrate_holder.rotation_angle_alpha_deg == 13.25  # noqa: PLR2004
+
+
+def test_parses_comma_separated_rotation_rows(tmp_path):
+    (tmp_path / 'Rotation.txt').write_text(
+        "'Synthetic Rotation Log File\n\n"
+        "'Date,Rotation.steps,Rotation.deg\n"
+        '15/01/2042,15:33:45.125,44,6.5\n'
+        '15/01/2042 15:33:46.250,45,7.5\n',
+        encoding='utf-8',
+    )
+
+    rotation = RHEEDMeasurement()._parse_rotation_log(tmp_path, get_logger(__name__))
+
+    assert list(rotation['steps']) == [44, 45]
+    assert list(rotation['alpha']) == [6.5, 7.5]
+    assert rotation.iloc[0]['parsed_datetime'] == datetime(
+        2042, 1, 15, 15, 33, 45, 125000, tzinfo=ZoneInfo('Europe/Berlin')
+    )
+    assert rotation.iloc[1]['parsed_datetime'] == datetime(
+        2042, 1, 15, 15, 33, 46, 250000, tzinfo=ZoneInfo('Europe/Berlin')
+    )
+
+
+def test_assigns_rotation_alpha_with_explicit_precedence_and_calculates_phi(
+    tmp_path,
+):
+    preceding_alpha = 12.75
+    latest_alpha = 13.25
+    large_explicit_alpha = 400
+    holder_offset = 27.5
+
+    def prepare_files(directory):
+        metadata_path = directory / 'nova_C_RHEED_meta_synthetic.csv'
+        with metadata_path.open(encoding='utf-8', newline='') as metadata_file:
+            reader = csv.DictReader(metadata_file)
+            fieldnames = reader.fieldnames
+            rows = list(reader)
+
+        rows[1]['mani_angle'] = '-1'
+
+        def explicit_row(filename, timestamp, alpha, sample_id):
+            row = {fieldname: '' for fieldname in fieldnames}
+            row.update(
+                {
+                    'file_name': f'nested/{filename}',
+                    'm8_id': sample_id,
+                    'date': '2042-05-06',
+                    'time': timestamp,
+                    'mani_angle': alpha,
+                    'comments': 'invented explicit rotation test',
+                }
+            )
+            return row
+
+        rows.extend(
+            [
+                explicit_row('zero_angle.pgm', '07-08-12.500', '0', 'zero_A'),
+                explicit_row(
+                    'large_angle.pgm',
+                    '07-08-12.500',
+                    str(large_explicit_alpha),
+                    'large_B',
+                ),
+                explicit_row('exact_angle.pgm', '07-08-10.625', '-1', 'exact_C'),
+            ]
+        )
+        with metadata_path.open('w', encoding='utf-8', newline='') as metadata_file:
+            writer = csv.DictWriter(metadata_file, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        for filename in (
+            'zero_angle.pgm',
+            'large_angle.pgm',
+            'exact_angle.pgm',
+            'automatic_2042-05-06___07-08-12.500.pgm',
+            'closer_future_2042-05-06___07-08-10.500.pgm',
+            'no_preceding_2042-05-06___07-08-08.250.pgm',
+        ):
+            (directory / filename).write_text('P2\n1 1\n9\n7\n', encoding='ascii')
+
+    measurement = _normalize_synthetic_measurement(tmp_path, prepare_files)
+    results = {result.name: result for result in measurement.results}
+
+    assert (
+        results['crystal_image.tif'].substrate_holder.rotation_angle_alpha_deg
+        == preceding_alpha
+    )
+    assert results['zero_angle.pgm'].substrate_holder.rotation_angle_alpha_deg == 0
+    assert (
+        results['large_angle.pgm'].substrate_holder.rotation_angle_alpha_deg
+        == large_explicit_alpha
+    )
+    assert (
+        results['exact_angle.pgm'].substrate_holder.rotation_angle_alpha_deg
+        == latest_alpha
+    )
+    assert (
+        results[
+            'automatic_2042-05-06___07-08-12.500.pgm'
+        ].substrate_holder.rotation_angle_alpha_deg
+        == latest_alpha
+    )
+    assert (
+        results[
+            'closer_future_2042-05-06___07-08-10.500.pgm'
+        ].substrate_holder.rotation_angle_alpha_deg
+        == preceding_alpha
+    )
+    assert (
+        getattr(
+            results['no_preceding_2042-05-06___07-08-08.250.pgm'].substrate_holder,
+            'rotation_angle_alpha_deg',
+            None,
+        )
+        is None
+    )
+    assert (
+        results['sweep.asc'].substrate_holder.rotation_angle_alpha_deg
+        == preceding_alpha
+    )
+
+    assert results['zero_angle.pgm'].sample.sample_azimuth_phi_deg == holder_offset
+    assert (
+        results['large_angle.pgm'].sample.sample_azimuth_phi_deg
+        == holder_offset + large_explicit_alpha
+    )
 
 
 def test_discovers_timestamped_tiff_and_pgm_files(tmp_path):

@@ -183,6 +183,10 @@ class RHEEDResult(MeasurementResult):
     def normalize(self, archive, logger):
         """Triggers the math to calculate the final sample azimuth angle from the holder offset."""
         super().normalize(archive, logger)
+        self._populate_sample_phi()
+
+    def _populate_sample_phi(self):
+        """Calculate sample azimuth from the measurement holder offset and alpha."""
         if self.sample and self.substrate_holder:
             alpha = self.substrate_holder.rotation_angle_alpha_deg
             parent_measurement = self.m_parent
@@ -280,6 +284,8 @@ class RHEEDMeasurement(Measurement, EntryData):
 
         self._autogenerate_measurement_id()
         super().normalize(archive, logger)
+        for result in self.results:
+            result._populate_sample_phi()
 
     def _autogenerate_measurement_id(self):
         """Creates a standardized ID based on the sample name and timestamp."""
@@ -299,14 +305,14 @@ class RHEEDMeasurement(Measurement, EntryData):
         """Master controller that orchestrates reading all files and mapping the data."""
         df_meta = self._load_and_prep_csv(mainfile_path)
         self._parse_excel_settings(mainfile_dir, all_files, logger)
-        self._parse_rotation_log(mainfile_dir, logger)
+        df_rot = self._parse_rotation_log(mainfile_dir, logger)
         self._set_color_table(all_files)
 
         assigned_files = self._process_explicit_files(
-            df_meta, mainfile_dir, all_files, logger
+            df_meta, df_rot, mainfile_dir, all_files, logger
         )
         self._process_unassigned_files(
-            df_meta, mainfile_dir, all_files, assigned_files, logger
+            df_meta, df_rot, mainfile_dir, all_files, assigned_files, logger
         )
 
     def _load_and_prep_csv(self, mainfile_path):
@@ -444,10 +450,19 @@ class RHEEDMeasurement(Measurement, EntryData):
                     raise ValueError('Rotation header must contain three columns')
 
                 records = []
+                date_time_part_count = 2
                 for line in lines[header_index + 1 :]:
                     if not line.strip():
                         continue
-                    parts = line.split()
+                    parts = (
+                        [part.strip() for part in next(csv.reader([line]))]
+                        if ',' in line
+                        else line.split()
+                    )
+                    if len(parts) == header_column_count:
+                        date_and_time = parts[0].split(maxsplit=1)
+                        if len(date_and_time) == date_time_part_count:
+                            parts = [*date_and_time, *parts[1:]]
                     data_column_count = 4
                     if len(parts) != data_column_count:
                         raise ValueError(f'Invalid rotation data row: {line.strip()}')
@@ -474,7 +489,7 @@ class RHEEDMeasurement(Measurement, EntryData):
                     logger.warning(f'Could not parse rotation log: {e}')
         return None
 
-    def _process_explicit_files(self, df_meta, mainfile_dir, all_files, logger):
+    def _process_explicit_files(self, df_meta, df_rot, mainfile_dir, all_files, logger):
         """Maps files that are explicitly named in the CSV rows (like video links)."""
         assigned_files = set()
         for _, row in df_meta.iterrows():
@@ -492,12 +507,19 @@ class RHEEDMeasurement(Measurement, EntryData):
                     result.datetime = row['parsed_datetime'].isoformat()
 
                 self._populate_schema_from_row(result, row)
+                explicit_alpha = self._safe_float(row.get('mani_angle'))
+                if (explicit_alpha is None or explicit_alpha == -1) and pd.notna(
+                    row.get('parsed_datetime')
+                ):
+                    self._match_unassigned_rotation(
+                        result, row['parsed_datetime'], df_rot
+                    )
                 self.results.append(result)
                 self._populate_image_plot(result, mainfile_dir, fname, logger)
         return assigned_files
 
-    def _process_unassigned_files(
-        self, df_meta, mainfile_dir, all_files, assigned_files, logger
+    def _process_unassigned_files(  # noqa: PLR0913, PLR0917
+        self, df_meta, df_rot, mainfile_dir, all_files, assigned_files, logger
     ):
         """Scans the upload folder for supported files not named by CSV rows."""
         time_pattern = re.compile(r'(\d{4}-\d{2}-\d{2}___\d{2}-\d{2}-\d{2}\.\d{3})')
@@ -522,6 +544,7 @@ class RHEEDMeasurement(Measurement, EntryData):
                 result.point_scans.append(point_scan)
                 result.datetime = start_time.isoformat()
                 self._match_scan_metadata(result, start_time, end_time, df_meta)
+                self._match_unassigned_rotation(result, start_time, df_rot)
                 self.results.append(result)
                 continue
 
@@ -541,7 +564,7 @@ class RHEEDMeasurement(Measurement, EntryData):
             result.datetime = file_dt.isoformat()
 
             self._match_unassigned_metadata(result, file_dt, df_meta)
-            # Rotation assignment remains disabled until its selection policy is approved.
+            self._match_unassigned_rotation(result, file_dt, df_rot)
 
             self.results.append(result)
             self._populate_image_plot(result, mainfile_dir, fname, logger)
@@ -765,7 +788,9 @@ class RHEEDMeasurement(Measurement, EntryData):
         candidates = df_meta.dropna(subset=['parsed_datetime'])
         exact = candidates[candidates['parsed_datetime'] == start_time]
         if not exact.empty:
-            self._populate_schema_from_row(result, exact.iloc[0])
+            self._populate_schema_from_row(
+                result, exact.iloc[0], include_rotation=False
+            )
             return
 
         during = candidates[
@@ -774,7 +799,9 @@ class RHEEDMeasurement(Measurement, EntryData):
         ]
         if not during.empty:
             self._populate_schema_from_row(
-                result, during.sort_values('parsed_datetime', kind='stable').iloc[0]
+                result,
+                during.sort_values('parsed_datetime', kind='stable').iloc[0],
+                include_rotation=False,
             )
             return
 
@@ -785,13 +812,16 @@ class RHEEDMeasurement(Measurement, EntryData):
                 before.sort_values(
                     'parsed_datetime', ascending=False, kind='stable'
                 ).iloc[0],
+                include_rotation=False,
             )
             return
 
         after = candidates[candidates['parsed_datetime'] > end_time]
         if not after.empty:
             self._populate_schema_from_row(
-                result, after.sort_values('parsed_datetime', kind='stable').iloc[0]
+                result,
+                after.sort_values('parsed_datetime', kind='stable').iloc[0],
+                include_rotation=False,
             )
 
     def _match_unassigned_metadata(self, result, file_dt, df_meta):
@@ -802,21 +832,27 @@ class RHEEDMeasurement(Measurement, EntryData):
                 best_row = past_meta.sort_values(
                     by='parsed_datetime', ascending=False
                 ).iloc[0]
-                self._populate_schema_from_row(result, best_row)
+                self._populate_schema_from_row(result, best_row, include_rotation=False)
 
-    def _match_unassigned_rotation(self, result, file_dt, df_rot):
-        """Finds the closest preceding rotation angle for a given image's timestamp."""
-        if df_rot is not None and 'parsed_datetime' in df_rot.columns:
-            past_rot = df_rot[df_rot['parsed_datetime'] <= file_dt]
-            if not past_rot.empty:
-                best_rot = past_rot.sort_values(
-                    by='parsed_datetime', ascending=False
-                ).iloc[0]
-                if result.substrate_holder is None:
-                    result.substrate_holder = SubstrateHolder()
-                result.substrate_holder.rotation_angle_alpha_deg = float(
-                    best_rot.iloc[-1]
-                )
+    def _match_unassigned_rotation(self, result, result_timestamp, df_rot):
+        """Assign the latest Rotation.txt alpha at or before a result timestamp."""
+        alpha = self._select_rotation_alpha(result_timestamp, df_rot)
+        if alpha is not None:
+            if result.substrate_holder is None:
+                result.substrate_holder = SubstrateHolder()
+            result.substrate_holder.rotation_angle_alpha_deg = alpha
+
+    @staticmethod
+    def _select_rotation_alpha(result_timestamp, df_rot):
+        """Return the latest rotation alpha at or before a timezone-aware timestamp."""
+        if df_rot is None or 'parsed_datetime' not in df_rot.columns:
+            return None
+
+        preceding = df_rot[df_rot['parsed_datetime'] <= result_timestamp]
+        if preceding.empty:
+            return None
+        latest = preceding.sort_values('parsed_datetime', kind='stable').iloc[-1]
+        return float(latest['alpha'])
 
     def _create_result_instance(self, fname, all_files):
         """Instantiates the correct schema SubSection (Image, Video, or Point Scan) based on file extension."""
@@ -850,9 +886,11 @@ class RHEEDMeasurement(Measurement, EntryData):
         except (ValueError, TypeError):
             return None
 
-    def _populate_schema_from_row(self, result_obj, row):
+    def _populate_schema_from_row(self, result_obj, row, include_rotation=True):
         result_obj.sample = self._create_sample_from_row(row)
-        result_obj.substrate_holder = self._create_holder_from_row(row)
+        result_obj.substrate_holder = self._create_holder_from_row(
+            row, include_rotation
+        )
 
         settings = RHEEDMeasurementSettings()
         settings.e_gun_FUG = self._create_egun_from_row(row)
@@ -909,7 +947,7 @@ class RHEEDMeasurement(Measurement, EntryData):
                 sample.sample_surface_hkl = str(row['film_orientation'])
         return sample
 
-    def _create_holder_from_row(self, row):
+    def _create_holder_from_row(self, row, include_rotation=True):
         """Extracts the substrate position and manual manipulation angle."""
         holder = SubstrateHolder()
         m8_val = str(row.get('m8_id', ''))
@@ -917,7 +955,7 @@ class RHEEDMeasurement(Measurement, EntryData):
             holder.position_measured = m8_val.split('_', maxsplit=1)[1]
 
         alpha = self._safe_float(row.get('mani_angle'))
-        if alpha is not None:
+        if include_rotation and alpha is not None and alpha != -1:
             holder.rotation_angle_alpha_deg = alpha
         return holder
 
