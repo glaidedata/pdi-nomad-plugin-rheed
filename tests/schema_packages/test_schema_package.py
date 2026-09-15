@@ -1,7 +1,7 @@
 import csv
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -16,6 +16,8 @@ from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
     RHEEDImageResult,
     RHEEDMeasurement,
     RHEEDPointScanResult,
+    Sample,
+    SubstrateHolder,
 )
 
 
@@ -229,6 +231,35 @@ def test_schema_extraction_normalization(tmp_path):
     assert measurement.color_table == 'color_scale.col'
 
 
+def test_extracts_holder_position_from_final_sample_id_suffix(tmp_path):
+    def prepare_files(directory):
+        metadata_path = directory / 'nova_C_RHEED_meta_synthetic.csv'
+        with metadata_path.open(encoding='utf-8', newline='') as metadata_file:
+            reader = csv.DictReader(metadata_file)
+            fieldnames = reader.fieldnames
+            rows = list(reader)
+
+        rows[0]['m8_id'] = 'synthetic_growth_001_A'
+        with metadata_path.open('w', encoding='utf-8', newline='') as metadata_file:
+            writer = csv.DictWriter(metadata_file, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    measurement = _normalize_synthetic_measurement(tmp_path, prepare_files)
+    result = next(
+        result for result in measurement.results if result.name == 'orbit_capture.dst'
+    )
+
+    assert result.sample.sample_id == 'synthetic_growth_001_A'
+    assert result.substrate_holder.position_measured == 'A'
+    assert (
+        measurement._derive_growth_id(
+            result.sample.sample_id, result.substrate_holder.position_measured
+        )
+        == 'synthetic_growth_001'
+    )
+
+
 def test_maps_all_fug_deflection_fields_and_preserves_missing_values(tmp_path):
     measurement = _normalize_synthetic_measurement(tmp_path)
     deflection = measurement.results[0].measurement_settings.deflection_unit_FUG
@@ -281,6 +312,111 @@ def test_raw_file_quantities_use_nomad_file_references(tmp_path):
         == 'sensor_overview_2042-05-06___07-08-09.750.tif'
     )
     assert measurement.m_to_dict()['color_table'] == 'color_scale.col'
+
+
+def test_links_single_mbe_experiment_for_shared_growth_id():
+    measurement = RHEEDMeasurement()
+    for holder_position in ('A', 'B'):
+        measurement.results.append(
+            RHEEDImageResult(
+                sample=Sample(sample_id=f'synthetic_growth_{holder_position}'),
+                substrate_holder=SubstrateHolder(position_measured=holder_position),
+            )
+        )
+    archive = MagicMock()
+    archive.metadata.main_author.user_id = 'synthetic-user'
+    response = MagicMock(
+        data=[{'upload_id': 'synthetic-upload', 'entry_id': 'synthetic-entry'}]
+    )
+
+    with patch(
+        'pdi_nomad_plugin_rheed.schema_packages.schema_package._search_nomad_entries',
+        return_value=response,
+    ) as search_entries:
+        measurement._link_mbe_experiment(archive, MagicMock())
+
+    assert measurement.m_to_dict()['mbe_experiment_ref'] == (
+        '../uploads/synthetic-upload/archive/synthetic-entry#data'
+    )
+    search_entries.assert_called_once_with(
+        owner='all',
+        user_id='synthetic-user',
+        query={
+            'search_quantities': {
+                'id': 'data.lab_id#pdi_nomad_plugin.mbe.processes.ExperimentMbePDI',
+                'str_value': 'synthetic_growth',
+            }
+        },
+    )
+
+
+def test_leaves_mbe_experiment_ref_unset_without_one_unique_match():
+    measurement = RHEEDMeasurement(
+        results=[
+            RHEEDImageResult(
+                sample=Sample(sample_id='synthetic_growth_A'),
+                substrate_holder=SubstrateHolder(position_measured='A'),
+            )
+        ]
+    )
+    archive = MagicMock()
+    archive.metadata.main_author.user_id = 'synthetic-user'
+
+    for matches in (
+        [],
+        [
+            {'upload_id': 'synthetic-upload-one', 'entry_id': 'synthetic-entry-one'},
+            {'upload_id': 'synthetic-upload-two', 'entry_id': 'synthetic-entry-two'},
+        ],
+    ):
+        logger = MagicMock()
+        with patch(
+            'pdi_nomad_plugin_rheed.schema_packages.schema_package._search_nomad_entries',
+            return_value=MagicMock(data=matches),
+        ):
+            measurement._link_mbe_experiment(archive, logger)
+
+        assert measurement.mbe_experiment_ref is None
+
+    logger.warning.assert_called_once()
+
+
+def test_preserves_manual_mbe_experiment_ref():
+    manual_reference = '../uploads/manual-upload/archive/manual-entry#data'
+    measurement = RHEEDMeasurement(mbe_experiment_ref=manual_reference)
+
+    with patch(
+        'pdi_nomad_plugin_rheed.schema_packages.schema_package._search_nomad_entries'
+    ) as search_entries:
+        measurement._link_mbe_experiment(MagicMock(), MagicMock())
+
+    assert measurement.m_to_dict()['mbe_experiment_ref'] == manual_reference
+    search_entries.assert_not_called()
+
+
+def test_does_not_link_mbe_experiment_for_multiple_growth_ids():
+    measurement = RHEEDMeasurement(
+        results=[
+            RHEEDImageResult(
+                sample=Sample(sample_id='synthetic_one_A'),
+                substrate_holder=SubstrateHolder(position_measured='A'),
+            ),
+            RHEEDImageResult(
+                sample=Sample(sample_id='synthetic_two_B'),
+                substrate_holder=SubstrateHolder(position_measured='B'),
+            ),
+        ]
+    )
+    archive = MagicMock()
+    archive.metadata.main_author.user_id = 'synthetic-user'
+
+    with patch(
+        'pdi_nomad_plugin_rheed.schema_packages.schema_package._search_nomad_entries'
+    ) as search_entries:
+        measurement._link_mbe_experiment(archive, MagicMock())
+
+    assert measurement.mbe_experiment_ref is None
+    search_entries.assert_not_called()
 
 
 def test_interprets_csv_source_times_as_berlin_wall_clock_times(tmp_path):

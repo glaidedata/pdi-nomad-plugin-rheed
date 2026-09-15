@@ -24,6 +24,14 @@ from PIL import Image
 
 m_package = SchemaPackage()
 SOURCE_TIMEZONE = ZoneInfo('Europe/Berlin')
+MBE_EXPERIMENT_LAB_ID = 'data.lab_id#pdi_nomad_plugin.mbe.processes.ExperimentMbePDI'
+
+
+def _search_nomad_entries(owner, user_id, query):
+    """Import NOMAD search lazily so the PDI plugin remains optional."""
+    from nomad.search import search
+
+    return search(owner=owner, user_id=user_id, query=query)
 
 
 # ---------------------------------------------------------
@@ -283,9 +291,83 @@ class RHEEDMeasurement(Measurement, EntryData):
                     logger.error(f'Error parsing RHEED metadata CSV: {e}')
 
         self._autogenerate_measurement_id()
+        self._link_mbe_experiment(archive, logger)
         super().normalize(archive, logger)
         for result in self.results:
             result._populate_sample_phi()
+
+    @staticmethod
+    def _derive_growth_id(sample_id, holder_position):
+        """Remove the known holder-position suffix from a full sample ID."""
+        suffix = f'_{holder_position}'
+        if sample_id.endswith(suffix) and len(sample_id) > len(suffix):
+            return sample_id[: -len(suffix)]
+        return None
+
+    def _get_single_growth_id(self):
+        """Return the one growth ID shared by every parsed result sample."""
+        growth_ids = set()
+        for result in self.results:
+            sample_id = getattr(getattr(result, 'sample', None), 'sample_id', None)
+            holder_position = getattr(
+                getattr(result, 'substrate_holder', None), 'position_measured', None
+            )
+            if not sample_id or not holder_position:
+                return None
+            growth_id = self._derive_growth_id(sample_id, holder_position)
+            if growth_id is None:
+                return None
+            growth_ids.add(growth_id)
+
+        if len(growth_ids) == 1:
+            return growth_ids.pop()
+        return None
+
+    def _link_mbe_experiment(self, archive, logger):
+        """Link the single visible PDI MBE experiment matching this growth ID."""
+        if self.mbe_experiment_ref:
+            return
+
+        main_author = getattr(getattr(archive, 'metadata', None), 'main_author', None)
+        user_id = getattr(main_author, 'user_id', main_author)
+        if not user_id:
+            return
+
+        growth_id = self._get_single_growth_id()
+        if growth_id is None:
+            return
+
+        try:
+            response = _search_nomad_entries(
+                owner='all',
+                user_id=user_id,
+                query={
+                    'search_quantities': {
+                        'id': MBE_EXPERIMENT_LAB_ID,
+                        'str_value': growth_id,
+                    }
+                },
+            )
+        except Exception as error:
+            if logger:
+                logger.warning(
+                    f'Could not resolve MBE experiment for growth ID {growth_id}: {error}'
+                )
+            return
+
+        matches = response.data
+        if len(matches) != 1:
+            if len(matches) > 1 and logger:
+                logger.warning(
+                    f'Ambiguous MBE experiment matches for growth ID {growth_id}'
+                )
+            return
+
+        match = matches[0]
+        upload_id = match.get('upload_id')
+        entry_id = match.get('entry_id')
+        if upload_id and entry_id:
+            self.mbe_experiment_ref = f'../uploads/{upload_id}/archive/{entry_id}#data'
 
     def _autogenerate_measurement_id(self):
         """Creates a standardized ID based on the sample name and timestamp."""
@@ -952,7 +1034,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         holder = SubstrateHolder()
         m8_val = str(row.get('m8_id', ''))
         if '_' in m8_val:
-            holder.position_measured = m8_val.split('_', maxsplit=1)[1]
+            holder.position_measured = m8_val.rsplit('_', maxsplit=1)[1]
 
         alpha = self._safe_float(row.get('mani_angle'))
         if include_rotation and alpha is not None and alpha != -1:
