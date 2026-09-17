@@ -513,26 +513,36 @@ class RHEEDMeasurement(Measurement, EntryData):
                 if logger:
                     logger.warning(f'Could not parse Excel settings: {e}')
 
-    def _parse_rotation_log(self, mainfile_dir, logger):
-        """Reads 'Rotation.txt' to extract real-time sample rotation angles."""
-        rot_path = os.path.join(mainfile_dir, 'Rotation.txt')
-        if os.path.exists(rot_path):
+    def _parse_rotation_log(self, mainfile_dir, logger):  # noqa: PLR0912
+        """Discover and read a timestamped EPIC rotation-angle log."""
+        for filename in sorted(os.listdir(mainfile_dir)):
+            if not filename.lower().endswith('.txt'):
+                continue
+
+            rotation_path = os.path.join(mainfile_dir, filename)
             try:
-                with open(rot_path, encoding='utf-8-sig') as rotation_file:
+                with open(rotation_path, encoding='utf-8-sig') as rotation_file:
                     lines = rotation_file.readlines()
 
                 header_index = next(
-                    index
-                    for index, line in enumerate(lines[1:], start=1)
-                    if ',' in line
+                    (
+                        index
+                        for index, line in enumerate(lines)
+                        if {
+                            value.strip().lstrip("'").lower()
+                            for value in next(csv.reader([line]))
+                        }
+                        >= {'date', 'rotation.deg'}
+                    ),
+                    None,
                 )
-                header = next(csv.reader([lines[header_index].lstrip("'").strip()]))
-                header_column_count = 3
-                if len(header) != header_column_count:
-                    raise ValueError('Rotation header must contain three columns')
+                if header_index is None:
+                    continue
 
                 records = []
-                date_time_part_count = 2
+                date_and_alpha_count = 2
+                date_time_and_alpha_count = 3
+                date_time_steps_and_alpha_count = 4
                 for line in lines[header_index + 1 :]:
                     if not line.strip():
                         continue
@@ -541,24 +551,39 @@ class RHEEDMeasurement(Measurement, EntryData):
                         if ',' in line
                         else line.split()
                     )
-                    if len(parts) == header_column_count:
+                    if len(parts) == date_and_alpha_count:
                         date_and_time = parts[0].split(maxsplit=1)
-                        if len(date_and_time) == date_time_part_count:
-                            parts = [*date_and_time, *parts[1:]]
-                    data_column_count = 4
-                    if len(parts) != data_column_count:
+                        steps = None
+                        alpha = parts[1]
+                    elif len(parts) == date_time_and_alpha_count:
+                        if ',' in line:
+                            date_and_time = parts[0].split(maxsplit=1)
+                            steps = parts[1]
+                            alpha = parts[2]
+                        else:
+                            date_and_time = parts[:2]
+                            steps = None
+                            alpha = parts[2]
+                    elif len(parts) == date_time_steps_and_alpha_count:
+                        date_and_time = parts[:2]
+                        steps = parts[2]
+                        alpha = parts[3]
+                    else:
                         raise ValueError(f'Invalid rotation data row: {line.strip()}')
+
+                    if len(date_and_time) != date_and_alpha_count:
+                        raise ValueError(f'Invalid rotation timestamp: {line.strip()}')
                     parsed_datetime = self._parse_source_datetime(
-                        f'{parts[0]} {parts[1]}',
+                        ' '.join(date_and_time),
                         ('%d/%m/%Y %H:%M:%S.%f', '%d/%m/%Y %H:%M:%S'),
                     )
                     records.append(
                         {
-                            'date': parts[0],
-                            'time': parts[1],
-                            'steps': int(parts[2]),
+                            'date': date_and_time[0],
+                            'time': date_and_time[1],
+                            'steps': int(steps) if steps is not None else None,
                             'parsed_datetime': parsed_datetime,
-                            'alpha': float(parts[3]),
+                            'alpha': float(alpha),
                         }
                     )
 
@@ -566,9 +591,9 @@ class RHEEDMeasurement(Measurement, EntryData):
                     records,
                     columns=['date', 'time', 'steps', 'parsed_datetime', 'alpha'],
                 )
-            except Exception as e:
+            except Exception as error:
                 if logger:
-                    logger.warning(f'Could not parse rotation log: {e}')
+                    logger.warning(f'Could not parse rotation log {filename}: {error}')
         return None
 
     def _process_explicit_files(self, df_meta, df_rot, mainfile_dir, all_files, logger):
@@ -917,7 +942,7 @@ class RHEEDMeasurement(Measurement, EntryData):
                 self._populate_schema_from_row(result, best_row, include_rotation=False)
 
     def _match_unassigned_rotation(self, result, result_timestamp, df_rot):
-        """Assign the latest Rotation.txt alpha at or before a result timestamp."""
+        """Assign the latest rotation-log alpha at or before a result timestamp."""
         alpha = self._select_rotation_alpha(result_timestamp, df_rot)
         if alpha is not None:
             if result.substrate_holder is None:

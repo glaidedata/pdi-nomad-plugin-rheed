@@ -537,6 +537,24 @@ def test_parses_comma_separated_rotation_rows(tmp_path):
     )
 
 
+def test_discovers_two_column_rotation_log_without_steps(tmp_path):
+    (tmp_path / 'synthetic_angle_log.txt').write_text(
+        "'Synthetic Rotation Log File\n\n"
+        "'Date,Rotation.deg\n"
+        '15/01/2042 15:33:45.125,278.00\n'
+        '15/01/2042 15:33:46.250,279.00\n',
+        encoding='utf-8',
+    )
+
+    rotation = RHEEDMeasurement()._parse_rotation_log(tmp_path, get_logger(__name__))
+
+    assert list(rotation['alpha']) == [278.0, 279.0]
+    assert rotation['steps'].isna().all()
+    assert rotation.iloc[0]['parsed_datetime'] == datetime(
+        2042, 1, 15, 15, 33, 45, 125000, tzinfo=ZoneInfo('Europe/Berlin')
+    )
+
+
 def test_assigns_rotation_alpha_with_explicit_precedence_and_calculates_phi(
     tmp_path,
 ):
