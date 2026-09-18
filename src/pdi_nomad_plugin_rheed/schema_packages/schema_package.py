@@ -279,19 +279,24 @@ class RHEEDMeasurement(Measurement, EntryData):
 
     def normalize(self, archive, logger):
         """Main trigger: locates uploaded files in the server context and starts the parsing process."""
+        local_excel_loaded = None
         if self.data_file and not self.results:
             try:
                 with archive.m_context.raw_file(self.data_file, 'r') as f:
                     mainfile_path = f.name
                 mainfile_dir = os.path.dirname(mainfile_path)
                 all_files = os.listdir(mainfile_dir)
-                self._parse_all_data(mainfile_path, mainfile_dir, all_files, logger)
+                local_excel_loaded = self._parse_all_data(
+                    mainfile_path, mainfile_dir, all_files, logger
+                )
             except Exception as e:
                 if logger:
                     logger.error(f'Error parsing RHEED metadata CSV: {e}')
 
         self._autogenerate_measurement_id()
         self._link_mbe_experiment(archive, logger)
+        if local_excel_loaded is False:
+            self._parse_linked_mbe_excel_settings(logger)
         super().normalize(archive, logger)
         for result in self.results:
             result._populate_sample_phi()
@@ -386,7 +391,6 @@ class RHEEDMeasurement(Measurement, EntryData):
     def _parse_all_data(self, mainfile_path, mainfile_dir, all_files, logger):
         """Master controller that orchestrates reading all files and mapping the data."""
         df_meta = self._load_and_prep_csv(mainfile_path)
-        self._parse_excel_settings(mainfile_dir, all_files, logger)
         df_rot = self._parse_rotation_log(mainfile_dir, logger)
         self._set_color_table(all_files)
 
@@ -396,6 +400,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         self._process_unassigned_files(
             df_meta, df_rot, mainfile_dir, all_files, assigned_files, logger
         )
+        return self._parse_excel_settings(mainfile_dir, all_files, logger)
 
     def _load_and_prep_csv(self, mainfile_path):
         """Reads the master CSV and formats the timestamp columns for easy matching."""
@@ -435,83 +440,112 @@ class RHEEDMeasurement(Measurement, EntryData):
         except ValueError:
             return pd.NaT
 
-    def _parse_excel_settings(  # noqa: PLR0912
-        self, mainfile_dir, all_files, logger
-    ):
+    def _parse_excel_settings(self, mainfile_dir, all_files, logger):
         """Extracts static instrument configurations from the MBE Excel file."""
         excel_files = [f for f in all_files if f.endswith('.xlsx') and 'MBE' in f]
-        if excel_files:
-            try:
-                excel_path = os.path.join(mainfile_dir, excel_files[0])
+        if not excel_files:
+            return False
+
+        try:
+            excel_path = os.path.join(mainfile_dir, excel_files[0])
+            df_excel = pd.read_excel(
+                excel_path, sheet_name='RHEED settings', header=None
+            )
+            return self._populate_excel_settings(df_excel, logger)
+        except Exception as error:
+            if logger:
+                logger.warning(f'Could not parse local Excel settings: {error}')
+            return False
+
+    def _get_linked_mbe_experiment(self):
+        """Return the lazily resolved MBE experiment archive section, when linked."""
+        return self.mbe_experiment_ref
+
+    def _parse_linked_mbe_excel_settings(self, logger):
+        """Load RHEED settings through the linked MBE experiment's upload context."""
+        try:
+            experiment = self._get_linked_mbe_experiment()
+            data_file = getattr(experiment, 'data_file', None)
+            if not data_file:
+                if logger:
+                    logger.warning(
+                        'Linked MBE experiment has no data_file for RHEED settings'
+                    )
+                return False
+
+            experiment_context = experiment.m_root().m_context
+            with experiment_context.raw_file(str(data_file), 'rb') as excel_file:
                 df_excel = pd.read_excel(
-                    excel_path, sheet_name='RHEED settings', header=None
+                    excel_file, sheet_name='RHEED settings', header=None
                 )
-                if logger:
-                    logger.info(f'Loaded {len(df_excel)} rows from RHEED settings.')
+            return self._populate_excel_settings(df_excel, logger)
+        except Exception as error:
+            if logger:
+                logger.warning(
+                    f'Could not parse RHEED settings from linked MBE experiment: {error}'
+                )
+            return False
 
-                field_row_index = None
-                for index, row in df_excel.iterrows():
-                    non_empty = [
-                        str(value).strip()
-                        for value in row
-                        if pd.notna(value) and str(value).strip()
-                    ]
-                    if non_empty and non_empty[0].lower() == 'field':
-                        field_row_index = index
-                        break
+    def _populate_excel_settings(self, df_excel, logger):  # noqa: PLR0912
+        """Populate static RHEED settings from the documented field/value rows."""
+        if logger:
+            logger.info(f'Loaded {len(df_excel)} rows from RHEED settings.')
 
-                if field_row_index is None or field_row_index + 1 >= len(df_excel):
-                    raise ValueError(
-                        'Could not locate field row and following value row'
-                    )
+        field_row_index = None
+        for index, row in df_excel.iterrows():
+            non_empty = [
+                str(value).strip()
+                for value in row
+                if pd.notna(value) and str(value).strip()
+            ]
+            if non_empty and non_empty[0].lower() == 'field':
+                field_row_index = index
+                break
 
-                field_row = df_excel.iloc[field_row_index]
-                value_row = df_excel.iloc[field_row_index + 1]
-                values = {
-                    str(field).strip(): value_row.iloc[column]
-                    for column, field in enumerate(field_row)
-                    if pd.notna(field) and str(field).strip().lower() != 'field'
-                }
+        if field_row_index is None or field_row_index + 1 >= len(df_excel):
+            raise ValueError('Could not locate field row and following value row')
 
-                settings = InstrumentSettings()
-                electronics_type = values.get('electronics_type')
-                if pd.notna(electronics_type):
-                    settings.electronics_type = str(electronics_type).strip()
+        field_row = df_excel.iloc[field_row_index]
+        value_row = df_excel.iloc[field_row_index + 1]
+        values = {
+            str(field).strip(): value_row.iloc[column]
+            for column, field in enumerate(field_row)
+            if pd.notna(field) and str(field).strip().lower() != 'field'
+        }
 
-                distance = self._safe_float(values.get('distance_sample_to_screen_mm'))
-                if distance is not None:
-                    settings.chamber_geometry = ChamberGeometry(
-                        distance_sample_to_screen_mm=distance
-                    )
+        settings = InstrumentSettings()
+        electronics_type = values.get('electronics_type')
+        if pd.notna(electronics_type):
+            settings.electronics_type = str(electronics_type).strip()
 
-                camera_values = {
-                    'image_length_calibration_mm_per_px': self._safe_float(
-                        values.get('image_length_calibration_mm_per_px')
-                    ),
-                    'resolution_x_px': self._safe_float(values.get('resolution_x_px')),
-                    'resolution_y_px': self._safe_float(values.get('resolution_y_px')),
-                }
-                if any(value is not None for value in camera_values.values()):
-                    settings.camera = Camera()
-                    calibration = camera_values['image_length_calibration_mm_per_px']
-                    if calibration is not None:
-                        settings.camera.image_length_calibration_mm_per_px = calibration
-                    if camera_values['resolution_x_px'] is not None:
-                        settings.camera.resolution_x_px = int(
-                            camera_values['resolution_x_px']
-                        )
-                    if camera_values['resolution_y_px'] is not None:
-                        settings.camera.resolution_y_px = int(
-                            camera_values['resolution_y_px']
-                        )
+        distance = self._safe_float(values.get('distance_sample_to_screen_mm'))
+        if distance is not None:
+            settings.chamber_geometry = ChamberGeometry(
+                distance_sample_to_screen_mm=distance
+            )
 
-                self.instrument_settings = settings
-                offset = self._safe_float(values.get('sample_phi_holder_alpha_deg'))
-                if offset is not None:
-                    self.sample_phi_holder_alpha_deg = offset
-            except Exception as e:
-                if logger:
-                    logger.warning(f'Could not parse Excel settings: {e}')
+        camera_values = {
+            'image_length_calibration_mm_per_px': self._safe_float(
+                values.get('image_length_calibration_mm_per_px')
+            ),
+            'resolution_x_px': self._safe_float(values.get('resolution_x_px')),
+            'resolution_y_px': self._safe_float(values.get('resolution_y_px')),
+        }
+        if any(value is not None for value in camera_values.values()):
+            settings.camera = Camera()
+            calibration = camera_values['image_length_calibration_mm_per_px']
+            if calibration is not None:
+                settings.camera.image_length_calibration_mm_per_px = calibration
+            if camera_values['resolution_x_px'] is not None:
+                settings.camera.resolution_x_px = int(camera_values['resolution_x_px'])
+            if camera_values['resolution_y_px'] is not None:
+                settings.camera.resolution_y_px = int(camera_values['resolution_y_px'])
+
+        self.instrument_settings = settings
+        offset = self._safe_float(values.get('sample_phi_holder_alpha_deg'))
+        if offset is not None:
+            self.sample_phi_holder_alpha_deg = offset
+        return True
 
     def _parse_rotation_log(self, mainfile_dir, logger):  # noqa: PLR0912
         """Discover and read a timestamped EPIC rotation-angle log."""

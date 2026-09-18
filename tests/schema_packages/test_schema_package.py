@@ -1,6 +1,7 @@
 import csv
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -19,6 +20,54 @@ from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
     Sample,
     SubstrateHolder,
 )
+
+
+def _write_rheed_settings_workbook(path, values=None):
+    values = values or {
+        'electronics_type': 'FUG',
+        'distance': 412.5,
+        'calibration': 0.37,
+        'resolution_x': 320,
+        'resolution_y': 240,
+        'holder_offset': 27.5,
+    }
+    workbook = Workbook()
+    settings_sheet = workbook.active
+    settings_sheet.title = 'RHEED settings'
+    settings_sheet.append(['meaning', 'created', 'created', 'electronics'])
+    settings_sheet.append(['type', 'date', 'time', 'enum'])
+    settings_sheet.append(['unit', '', '', 'FUG|STAIB'])
+    settings_sheet.append(['format', 'date', 'time', 'string'])
+    settings_sheet.append(['mode', 'invented', 'invented', 'invented'])
+    settings_sheet.append(
+        [
+            'field',
+            'date',
+            'time',
+            'electronics_type',
+            'distance_sample_to_screen_mm',
+            'image_length_calibration_mm_per_px',
+            'resolution_x_px',
+            'resolution_y_px',
+            'sample_phi_holder_alpha_deg',
+            'comment',
+        ]
+    )
+    settings_sheet.append(
+        [
+            'value',
+            datetime(2042, 5, 6),
+            datetime(2042, 5, 6, 7, 8, 9).time(),
+            values['electronics_type'],
+            values['distance'],
+            values['calibration'],
+            values['resolution_x'],
+            values['resolution_y'],
+            values['holder_offset'],
+            'invented workbook comment',
+        ]
+    )
+    workbook.save(path)
 
 
 def _write_synthetic_inputs(tmp_path):
@@ -108,43 +157,7 @@ def _write_synthetic_inputs(tmp_path):
         '[Colors]\nGamma = 1.25\n', encoding='utf-8'
     )
 
-    workbook = Workbook()
-    settings_sheet = workbook.active
-    settings_sheet.title = 'RHEED settings'
-    settings_sheet.append(['meaning', 'created', 'created', 'electronics'])
-    settings_sheet.append(['type', 'date', 'time', 'enum'])
-    settings_sheet.append(['unit', '', '', 'FUG|STAIB'])
-    settings_sheet.append(['format', 'date', 'time', 'string'])
-    settings_sheet.append(['mode', 'invented', 'invented', 'invented'])
-    settings_sheet.append(
-        [
-            'field',
-            'date',
-            'time',
-            'electronics_type',
-            'distance_sample_to_screen_mm',
-            'image_length_calibration_mm_per_px',
-            'resolution_x_px',
-            'resolution_y_px',
-            'sample_phi_holder_alpha_deg',
-            'comment',
-        ]
-    )
-    settings_sheet.append(
-        [
-            'value',
-            datetime(2042, 5, 6),
-            datetime(2042, 5, 6, 7, 8, 9).time(),
-            'FUG',
-            412.5,
-            0.37,
-            320,
-            240,
-            27.5,
-            'invented workbook comment',
-        ]
-    )
-    workbook.save(tmp_path / 'MBE42_config_w_RHEED.xlsx')
+    _write_rheed_settings_workbook(tmp_path / 'MBE42_config_w_RHEED.xlsx')
 
     (tmp_path / 'Rotation.txt').write_text(
         "'Synthetic Rotation Log File\n\n"
@@ -183,6 +196,38 @@ def _normalize_synthetic_measurement(tmp_path, prepare_files=None):
     archive.m_context.raw_file.side_effect = mock_raw_file
     measurement.normalize(archive, get_logger(__name__))
     return measurement
+
+
+def _synthetic_linked_experiment(tmp_path, holder_offset):
+    remote_directory = tmp_path / 'synthetic-remote-upload'
+    remote_directory.mkdir()
+    remote_workbook = remote_directory / 'shared_rheed_settings.xlsx'
+    _write_rheed_settings_workbook(
+        remote_workbook,
+        {
+            'electronics_type': 'STAIB',
+            'distance': 615.25,
+            'calibration': 0.81,
+            'resolution_x': 640,
+            'resolution_y': 480,
+            'holder_offset': holder_offset,
+        },
+    )
+    remote_data_file = 'growth/shared_rheed_settings.xlsx'
+    remote_context = MagicMock()
+
+    @contextmanager
+    def raw_file(filename, mode):
+        assert filename == remote_data_file
+        assert mode == 'rb'
+        with remote_workbook.open('rb') as excel_file:
+            yield excel_file
+
+    remote_context.raw_file.side_effect = raw_file
+    experiment = MagicMock()
+    experiment.data_file = remote_data_file
+    experiment.m_root.return_value = SimpleNamespace(m_context=remote_context)
+    return experiment, remote_context
 
 
 def test_schema_extraction_normalization(tmp_path):
@@ -492,6 +537,77 @@ def test_parses_global_rheed_settings_from_excel(tmp_path):
     assert settings.camera.resolution_x_px == 320  # noqa: PLR2004
     assert settings.camera.resolution_y_px == 240  # noqa: PLR2004
     assert measurement.sample_phi_holder_alpha_deg == 27.5  # noqa: PLR2004
+
+
+def test_local_excel_settings_take_priority_over_linked_experiment(tmp_path):
+    with patch.object(
+        RHEEDMeasurement, '_parse_linked_mbe_excel_settings'
+    ) as parse_linked_settings:
+        measurement = _normalize_synthetic_measurement(tmp_path)
+
+    assert measurement.instrument_settings.electronics_type == 'FUG'
+    assert measurement.sample_phi_holder_alpha_deg == 27.5  # noqa: PLR2004
+    parse_linked_settings.assert_not_called()
+
+
+def test_loads_rheed_settings_from_linked_experiment_data_file(tmp_path):
+    experiment, remote_context = _synthetic_linked_experiment(tmp_path, 63.5)
+
+    def prepare_files(directory):
+        (directory / 'MBE42_config_w_RHEED.xlsx').unlink()
+
+    with (
+        patch.object(
+            RHEEDMeasurement, '_get_linked_mbe_experiment', return_value=experiment
+        ),
+        patch.object(RHEEDMeasurement, '_link_mbe_experiment'),
+    ):
+        measurement = _normalize_synthetic_measurement(tmp_path, prepare_files)
+
+    settings = measurement.instrument_settings
+    assert settings.electronics_type == 'STAIB'
+    assert settings.chamber_geometry.distance_sample_to_screen_mm == 615.25  # noqa: PLR2004
+    assert settings.camera.image_length_calibration_mm_per_px == 0.81  # noqa: PLR2004
+    assert settings.camera.resolution_x_px == 640  # noqa: PLR2004
+    assert settings.camera.resolution_y_px == 480  # noqa: PLR2004
+    assert measurement.sample_phi_holder_alpha_deg == 63.5  # noqa: PLR2004
+    remote_context.raw_file.assert_called_once_with(
+        'growth/shared_rheed_settings.xlsx', 'rb'
+    )
+
+
+def test_recalculates_phi_after_linked_experiment_settings_fallback(tmp_path):
+    holder_offset = 63.5
+    experiment, _ = _synthetic_linked_experiment(tmp_path, holder_offset)
+
+    def prepare_files(directory):
+        (directory / 'MBE42_config_w_RHEED.xlsx').unlink()
+
+    with (
+        patch.object(
+            RHEEDMeasurement, '_get_linked_mbe_experiment', return_value=experiment
+        ),
+        patch.object(RHEEDMeasurement, '_link_mbe_experiment'),
+    ):
+        measurement = _normalize_synthetic_measurement(tmp_path, prepare_files)
+
+    video = next(
+        result for result in measurement.results if result.name == 'orbit_capture.dst'
+    )
+    assert video.sample.sample_azimuth_phi_deg == holder_offset + 17.25  # noqa: PLR2004
+
+
+def test_missing_local_and_linked_excel_settings_does_not_interrupt_normalization(
+    tmp_path,
+):
+    def prepare_files(directory):
+        (directory / 'MBE42_config_w_RHEED.xlsx').unlink()
+
+    measurement = _normalize_synthetic_measurement(tmp_path, prepare_files)
+
+    assert len(measurement.results) == 4  # noqa: PLR2004
+    assert measurement.instrument_settings is None
+    assert measurement.sample_phi_holder_alpha_deg is None
 
 
 def test_parses_rotation_log_and_assigns_automatic_result(tmp_path):
