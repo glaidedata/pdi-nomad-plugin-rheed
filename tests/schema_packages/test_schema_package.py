@@ -17,8 +17,18 @@ from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
     RHEEDImageResult,
     RHEEDMeasurement,
     RHEEDPointScanResult,
+    RHEEDSensors,
     Sample,
+    SensorPositionOverview,
     SubstrateHolder,
+)
+
+SYNTHETIC_OVERVIEW_PIXELS = np.array(
+    [
+        [[11, 12, 13], [14, 15, 16]],
+        [[17, 18, 19], [20, 21, 22]],
+    ],
+    dtype=np.uint8,
 )
 
 
@@ -150,8 +160,8 @@ def _write_synthetic_inputs(tmp_path):
     (tmp_path / 'sensors_2042-05-06___07-08-08.000.sn').write_text(
         '[Sensor 0]\nType=Rect Area\n', encoding='utf-8'
     )
-    (tmp_path / 'sensor_overview_2042-05-06___07-08-09.750.tif').write_bytes(
-        b'synthetic sensor overview bytes'
+    Image.fromarray(SYNTHETIC_OVERVIEW_PIXELS).save(
+        tmp_path / 'sensor_overview_2042-05-06___07-08-09.750.tif'
     )
     (tmp_path / 'color_scale.col').write_text(
         '[Colors]\nGamma = 1.25\n', encoding='utf-8'
@@ -169,7 +179,9 @@ def _write_synthetic_inputs(tmp_path):
     return metadata_path
 
 
-def _normalize_synthetic_measurement(tmp_path, prepare_files=None):
+def _normalize_synthetic_measurement(
+    tmp_path, prepare_files=None, logger=None, data_file=None
+):
     metadata_path = _write_synthetic_inputs(tmp_path)
     if prepare_files:
         prepare_files(tmp_path)
@@ -179,7 +191,7 @@ def _normalize_synthetic_measurement(tmp_path, prepare_files=None):
         upload_id='synthetic-upload',
         entry_id='synthetic-entry',
     )
-    measurement = RHEEDMeasurement(data_file=str(metadata_path))
+    measurement = RHEEDMeasurement(data_file=data_file or str(metadata_path))
     archive.data = measurement
     archive.m_context = MagicMock()
     archive.m_context.upload_id = 'synthetic-upload'
@@ -194,7 +206,7 @@ def _normalize_synthetic_measurement(tmp_path, prepare_files=None):
         yield MockFile()
 
     archive.m_context.raw_file.side_effect = mock_raw_file
-    measurement.normalize(archive, get_logger(__name__))
+    measurement.normalize(archive, logger or get_logger(__name__))
     return measurement
 
 
@@ -260,20 +272,89 @@ def test_schema_extraction_normalization(tmp_path):
     assert point_scan.source_file == 'sweep.asc'
     assert point_scan.start_time == datetime(2042, 5, 6, 5, 8, 9, 500000, tzinfo=UTC)
     assert point_scan.end_time == datetime(2042, 5, 6, 5, 8, 10, 500000, tzinfo=UTC)
-    assert [sensor.sensor_name for sensor in point_scan.sensors] == [
+    assert [sensor.sensor_name for sensor in point_scan.sensors.sensors] == [
         'Sensor A',
         'Sensor B',
     ]
-    assert [sensor.sensor_id for sensor in point_scan.sensors] == [71001, 71002]
-    assert list(point_scan.sensors[0].relative_time.magnitude) == [0.0, 1.0]
-    assert list(point_scan.sensors[0].intensity) == [1.5, 3.5]
-    assert list(point_scan.sensors[1].intensity) == [2.5, 4.5]
+    assert [sensor.sensor_id for sensor in point_scan.sensors.sensors] == [71001, 71002]
+    assert list(point_scan.sensors.sensors[0].relative_time.magnitude) == [0.0, 1.0]
+    assert list(point_scan.sensors.sensors[0].intensity) == [1.5, 3.5]
+    assert list(point_scan.sensors.sensors[1].intensity) == [2.5, 4.5]
     assert point_scan.sensor_definition_file == 'sensors_2042-05-06___07-08-08.000.sn'
     assert (
-        point_scan.sensor_position_overview_picture
+        point_scan.sensor_position_overview_picture.file
         == 'sensor_overview_2042-05-06___07-08-09.750.tif'
     )
+    assert len(point_scan.sensors.figures) == 1
+    assert len(point_scan.sensor_position_overview_picture.figures) == 1
     assert measurement.color_table == 'color_scale.col'
+
+
+def test_point_scan_plot_combines_all_sensor_intensities_and_overview(tmp_path):
+    measurement = _normalize_synthetic_measurement(tmp_path)
+    scan_result = next(
+        result for result in measurement.results if result.name == 'sweep.asc'
+    )
+    point_scan = scan_result.point_scans[0]
+
+    intensity_figure = point_scan.sensors.figures[0].figure
+    overview_figure = point_scan.sensor_position_overview_picture.figures[0].figure
+
+    assert intensity_figure['layout']['showlegend'] is True
+    assert intensity_figure['layout']['xaxis']['title']['text'] == 'Time (s)'
+    assert intensity_figure['layout']['yaxis']['title']['text'] == 'Intensity'
+    assert len(intensity_figure['data']) == 2  # noqa: PLR2004
+    assert [trace['name'] for trace in intensity_figure['data']] == [
+        'Sensor A (71001)',
+        'Sensor B (71002)',
+    ]
+    assert [trace['x'] for trace in intensity_figure['data']] == [[0.0, 1.0]] * 2
+    assert [trace['y'] for trace in intensity_figure['data']] == [
+        [1.5, 3.5],
+        [2.5, 4.5],
+    ]
+    assert overview_figure['data'][0]['type'] == 'image'
+    assert np.array_equal(
+        np.asarray(overview_figure['data'][0]['z']), SYNTHETIC_OVERVIEW_PIXELS
+    )
+
+
+def test_point_scan_sensor_plot_exists_without_overview_image(tmp_path):
+    def prepare_files(directory):
+        (directory / 'sensor_overview_2042-05-06___07-08-09.750.tif').unlink()
+
+    measurement = _normalize_synthetic_measurement(tmp_path, prepare_files)
+    scan_result = next(
+        result for result in measurement.results if result.name == 'sweep.asc'
+    )
+    point_scan = scan_result.point_scans[0]
+
+    assert point_scan.sensor_position_overview_picture is None
+    assert len(point_scan.sensors.figures) == 1
+    assert len(point_scan.sensors.figures[0].figure['data']) == 2  # noqa: PLR2004
+
+
+def test_broken_point_scan_overview_does_not_suppress_sensor_plot(tmp_path):
+    overview_name = 'sensor_overview_2042-05-06___07-08-09.750.tif'
+
+    def prepare_files(directory):
+        (directory / overview_name).write_bytes(b'not a TIFF')
+
+    logger = MagicMock()
+    measurement = _normalize_synthetic_measurement(tmp_path, prepare_files, logger)
+    scan_result = next(
+        result for result in measurement.results if result.name == 'sweep.asc'
+    )
+    point_scan = scan_result.point_scans[0]
+
+    assert point_scan.sensor_position_overview_picture.file == overview_name
+    assert len(point_scan.sensor_position_overview_picture.figures) == 0
+    assert len(point_scan.sensors.figures) == 1
+    assert len(point_scan.sensors.figures[0].figure['data']) == 2  # noqa: PLR2004
+    assert any(
+        'Could not create point-scan overview preview' in call.args[0]
+        for call in logger.warning.call_args_list
+    )
 
 
 def test_extracts_holder_position_from_final_sample_id_suffix(tmp_path):
@@ -337,11 +418,12 @@ def test_raw_file_quantities_use_nomad_file_references(tmp_path):
     assert not isinstance(RHEEDMeasurement.m_def.all_quantities['data_file'].type, File)
     assert isinstance(RHEEDImageResult.m_def.all_quantities['images'].type, File)
     assert isinstance(PointScan.m_def.all_quantities['source_file'].type, File)
+    assert PointScan.m_def.all_sub_sections['sensors'].sub_section == RHEEDSensors.m_def
     assert isinstance(
         PointScan.m_def.all_quantities['sensor_definition_file'].type, File
     )
     assert isinstance(
-        PointScan.m_def.all_quantities['sensor_position_overview_picture'].type,
+        SensorPositionOverview.m_def.all_quantities['file'].type,
         File,
     )
     assert isinstance(RHEEDMeasurement.m_def.all_quantities['color_table'].type, File)
@@ -353,10 +435,55 @@ def test_raw_file_quantities_use_nomad_file_references(tmp_path):
         == 'sensors_2042-05-06___07-08-08.000.sn'
     )
     assert (
-        point_scan.m_to_dict()['sensor_position_overview_picture']
+        point_scan.m_to_dict()['sensor_position_overview_picture']['file']
         == 'sensor_overview_2042-05-06___07-08-09.750.tif'
     )
     assert measurement.m_to_dict()['color_table'] == 'color_scale.col'
+    assert all(
+        not value.startswith(str(tmp_path))
+        for value in (
+            image.images,
+            point_scan.source_file,
+            point_scan.sensor_definition_file,
+            point_scan.sensor_position_overview_picture.file,
+            measurement.color_table,
+        )
+    )
+
+
+def test_root_level_mainfile_keeps_sibling_raw_references_at_root(tmp_path):
+    measurement = _normalize_synthetic_measurement(tmp_path, data_file='metadata.csv')
+    results = {result.name: result for result in measurement.results}
+    point_scan = results['sweep.asc'].point_scans[0]
+
+    assert results['crystal_image.tif'].images == 'crystal_image.tif'
+    assert point_scan.source_file == 'sweep.asc'
+    assert point_scan.sensor_definition_file == 'sensors_2042-05-06___07-08-08.000.sn'
+    assert (
+        point_scan.sensor_position_overview_picture.file
+        == 'sensor_overview_2042-05-06___07-08-09.750.tif'
+    )
+    assert measurement.color_table == 'color_scale.col'
+
+
+def test_nested_mainfile_stores_upload_relative_sibling_raw_references(tmp_path):
+    measurement = _normalize_synthetic_measurement(
+        tmp_path, data_file='nested/rheed/metadata.csv'
+    )
+    results = {result.name: result for result in measurement.results}
+    point_scan = results['sweep.asc'].point_scans[0]
+
+    assert results['crystal_image.tif'].images == 'nested/rheed/crystal_image.tif'
+    assert point_scan.source_file == 'nested/rheed/sweep.asc'
+    assert (
+        point_scan.sensor_definition_file
+        == 'nested/rheed/sensors_2042-05-06___07-08-08.000.sn'
+    )
+    assert (
+        point_scan.sensor_position_overview_picture.file
+        == 'nested/rheed/sensor_overview_2042-05-06___07-08-09.750.tif'
+    )
+    assert measurement.color_table == 'nested/rheed/color_scale.col'
 
 
 def test_links_single_mbe_experiment_for_shared_growth_id():

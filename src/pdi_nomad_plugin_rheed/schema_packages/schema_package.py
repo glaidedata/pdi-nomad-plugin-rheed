@@ -1,5 +1,6 @@
 import csv
 import os
+import posixpath
 import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -231,14 +232,24 @@ class RHEEDSensor(ArchiveSection):
     intensity = Quantity(type=float, shape=['*'])
 
 
+class RHEEDSensors(PlotSection):
+    """Point-scan sensors and their combined intensity plot."""
+
+    sensors = SubSection(section_def=RHEEDSensor, repeats=True)
+
+
+class SensorPositionOverview(PlotSection):
+    """Sensor-position overview raw file and its TIFF plot."""
+
+    file = Quantity(type=File, a_browser=dict(adaptor='RawFileAdaptor'))
+
+
 class PointScan(ArchiveSection):
     source_file = Quantity(type=File, a_browser=dict(adaptor='RawFileAdaptor'))
     start_time = Quantity(type=Datetime)
     end_time = Quantity(type=Datetime)
-    sensors = SubSection(section_def=RHEEDSensor, repeats=True)
-    sensor_position_overview_picture = Quantity(
-        type=File, a_browser=dict(adaptor='RawFileAdaptor')
-    )
+    sensors = SubSection(section_def=RHEEDSensors)
+    sensor_position_overview_picture = SubSection(section_def=SensorPositionOverview)
     sensor_definition_file = Quantity(
         type=File, a_browser=dict(adaptor='RawFileAdaptor')
     )
@@ -401,6 +412,20 @@ class RHEEDMeasurement(Measurement, EntryData):
             df_meta, df_rot, mainfile_dir, all_files, assigned_files, logger
         )
         return self._parse_excel_settings(mainfile_dir, all_files, logger)
+
+    def _raw_sibling_path(self, filename):
+        """Return a sibling's upload-relative raw path without local path leakage."""
+        sibling_name = str(filename).replace('\\', '/').rsplit('/', maxsplit=1)[-1]
+        data_file = str(self.data_file or '')
+        if os.path.isabs(data_file) or re.match(r'^[A-Za-z]:[\\/]', data_file):
+            return sibling_name
+
+        raw_directory = posixpath.dirname(data_file.replace('\\', '/'))
+        return (
+            posixpath.join(raw_directory, sibling_name)
+            if raw_directory and raw_directory != '.'
+            else sibling_name
+        )
 
     def _load_and_prep_csv(self, mainfile_path):
         """Reads the master CSV and formats the timestamp columns for easy matching."""
@@ -682,6 +707,7 @@ class RHEEDMeasurement(Measurement, EntryData):
                 self._associate_scan_auxiliaries(
                     point_scan, start_time, end_time, all_files
                 )
+                self._populate_point_scan_plots(point_scan, mainfile_dir, logger)
                 result.point_scans.append(point_scan)
                 result.datetime = start_time.isoformat()
                 self._match_scan_metadata(result, start_time, end_time, df_meta)
@@ -762,11 +788,54 @@ class RHEEDMeasurement(Measurement, EntryData):
             raise ValueError('PGM pixel count does not match its dimensions')
         return np.asarray(values).reshape(height, width)
 
+    def _populate_point_scan_plots(self, point_scan, mainfile_dir, logger):
+        """Store sensor traces and an optional sensor-position overview in Plotly."""
+        sensor_traces = [
+            go.Scatter(
+                x=sensor.relative_time.magnitude,
+                y=sensor.intensity,
+                name=f'{sensor.sensor_name} ({sensor.sensor_id})',
+            )
+            for sensor in point_scan.sensors.sensors
+        ]
+        point_scan.sensors.figures.append(
+            PlotlyFigure(
+                label='Sensor intensities',
+                figure=go.Figure(data=sensor_traces)
+                .update_layout(
+                    showlegend=True,
+                    xaxis_title='Time (s)',
+                    yaxis_title='Intensity',
+                )
+                .to_plotly_json(),
+            )
+        )
+
+        overview = point_scan.sensor_position_overview_picture
+        if not overview:
+            return
+
+        try:
+            overview_path = os.path.join(mainfile_dir, os.path.basename(overview.file))
+            overview_trace = go.Image(z=self._read_tiff_array(overview_path))
+            overview.figures.append(
+                PlotlyFigure(
+                    label='Sensor position overview',
+                    figure=go.Figure(data=[overview_trace]).to_plotly_json(),
+                )
+            )
+        except Exception as error:
+            if logger:
+                logger.warning(
+                    f'Could not create point-scan overview preview for '
+                    f'{overview.file}: {error}'
+                )
+
     def _set_color_table(self, all_files):
         """Link the first available color table without interpreting its LUT values."""
         color_tables = sorted(f for f in all_files if f.lower().endswith('.col'))
         if color_tables:
-            self.color_table = color_tables[0]
+            self.color_table = self._raw_sibling_path(color_tables[0])
 
     def _associate_scan_auxiliaries(self, point_scan, start_time, end_time, all_files):
         """Link timestamped scan auxiliary files using scan-interval priority."""
@@ -774,12 +843,20 @@ class RHEEDMeasurement(Measurement, EntryData):
         overview_images = [
             f for f in all_files if f.lower().endswith('.tif') and 'sensor' in f.lower()
         ]
-        point_scan.sensor_definition_file = self._select_scan_auxiliary(
+        sensor_definition_filename = self._select_scan_auxiliary(
             sensor_definitions, start_time, end_time
         )
-        point_scan.sensor_position_overview_picture = self._select_scan_auxiliary(
+        if sensor_definition_filename:
+            point_scan.sensor_definition_file = self._raw_sibling_path(
+                sensor_definition_filename
+            )
+        overview_filename = self._select_scan_auxiliary(
             overview_images, start_time, end_time
         )
+        if overview_filename:
+            point_scan.sensor_position_overview_picture = SensorPositionOverview(
+                file=self._raw_sibling_path(overview_filename)
+            )
 
     def _select_scan_auxiliary(self, filenames, start_time, end_time):
         """Select a timestamped auxiliary by exact, during, before, then after."""
@@ -902,7 +979,9 @@ class RHEEDMeasurement(Measurement, EntryData):
             return None, None, None
 
         point_scan = PointScan(
-            source_file=os.path.basename(fname), start_time=start_time.isoformat()
+            source_file=self._raw_sibling_path(fname),
+            start_time=start_time.isoformat(),
+            sensors=RHEEDSensors(),
         )
         relative_time = [row[0] for row in rows]
         point_scan.end_time = (
@@ -911,7 +990,7 @@ class RHEEDMeasurement(Measurement, EntryData):
         for index, (sensor_name, sensor_id) in enumerate(
             zip(sensor_names, sensor_ids, strict=True)
         ):
-            point_scan.sensors.append(
+            point_scan.sensors.sensors.append(
                 RHEEDSensor(
                     sensor_name=sensor_name,
                     sensor_id=sensor_id,
@@ -1003,7 +1082,7 @@ class RHEEDMeasurement(Measurement, EntryData):
             res.name = fname
             res.result_type = 'image'
             if fname in all_files:
-                res.images = fname
+                res.images = self._raw_sibling_path(fname)
             return res
         elif fname.endswith(('.asc', '.csv')) and 'sensor' not in fname.lower():
             res = RHEEDPointScanResult()
