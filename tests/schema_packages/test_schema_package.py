@@ -17,7 +17,9 @@ from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
     RHEEDImageResult,
     RHEEDMeasurement,
     RHEEDPointScanResult,
+    RHEEDResult,
     RHEEDSensors,
+    RHEEDVideoResult,
     Sample,
     SensorPositionOverview,
     SubstrateHolder,
@@ -287,6 +289,7 @@ def test_schema_extraction_normalization(tmp_path):
     )
     assert len(point_scan.sensors.figures) == 1
     assert len(point_scan.sensor_position_overview_picture.figures) == 1
+    assert len(scan.figures) == 2  # noqa: PLR2004
     assert measurement.color_table == 'color_scale.col'
 
 
@@ -317,6 +320,12 @@ def test_point_scan_plot_combines_all_sensor_intensities_and_overview(tmp_path):
     assert np.array_equal(
         np.asarray(overview_figure['data'][0]['z']), SYNTHETIC_OVERVIEW_PIXELS
     )
+    assert [figure.label for figure in scan_result.figures] == [
+        'Sensor intensities',
+        'Sensor position overview',
+    ]
+    assert scan_result.figures[0].figure == intensity_figure
+    assert scan_result.figures[1].figure == overview_figure
 
 
 def test_point_scan_sensor_plot_exists_without_overview_image(tmp_path):
@@ -332,6 +341,7 @@ def test_point_scan_sensor_plot_exists_without_overview_image(tmp_path):
     assert point_scan.sensor_position_overview_picture is None
     assert len(point_scan.sensors.figures) == 1
     assert len(point_scan.sensors.figures[0].figure['data']) == 2  # noqa: PLR2004
+    assert len(scan_result.figures) == 1
 
 
 def test_broken_point_scan_overview_does_not_suppress_sensor_plot(tmp_path):
@@ -351,6 +361,7 @@ def test_broken_point_scan_overview_does_not_suppress_sensor_plot(tmp_path):
     assert len(point_scan.sensor_position_overview_picture.figures) == 0
     assert len(point_scan.sensors.figures) == 1
     assert len(point_scan.sensors.figures[0].figure['data']) == 2  # noqa: PLR2004
+    assert len(scan_result.figures) == 1
     assert any(
         'Could not create point-scan overview preview' in call.args[0]
         for call in logger.warning.call_args_list
@@ -417,6 +428,30 @@ def test_raw_file_quantities_use_nomad_file_references(tmp_path):
     )
     assert not isinstance(RHEEDMeasurement.m_def.all_quantities['data_file'].type, File)
     assert isinstance(RHEEDImageResult.m_def.all_quantities['images'].type, File)
+    assert 'plot' not in RHEEDImageResult.m_def.all_sub_sections
+    assert RHEEDResult.m_def.a_display.visible.exclude == ['figures']
+    assert RHEEDImageResult.m_def.a_display.visible.exclude == ['figures']
+    assert RHEEDPointScanResult.m_def.a_display.visible.exclude == ['figures']
+    assert RHEEDVideoResult.m_def.a_display.visible.exclude == ['figures']
+    assert RHEEDSensors.m_def.a_display.visible.exclude == ['figures']
+    assert SensorPositionOverview.m_def.a_display.visible.exclude == ['figures']
+    for section_definition in (
+        RHEEDResult.m_def,
+        RHEEDImageResult.m_def,
+        RHEEDPointScanResult.m_def,
+        RHEEDVideoResult.m_def,
+        RHEEDSensors.m_def,
+        SensorPositionOverview.m_def,
+    ):
+        assert 'figures' in section_definition.all_sub_sections
+    for section_definition in (
+        RHEEDImageResult.m_def,
+        RHEEDPointScanResult.m_def,
+        RHEEDVideoResult.m_def,
+    ):
+        assert 'PlotSection' in [
+            section.name for section in section_definition.all_base_sections
+        ]
     assert isinstance(PointScan.m_def.all_quantities['source_file'].type, File)
     assert PointScan.m_def.all_sub_sections['sensors'].sub_section == RHEEDSensors.m_def
     assert isinstance(
@@ -640,12 +675,10 @@ def test_stores_tiff_and_pgm_plotly_previews_with_raw_references(
 
     assert tiff_result.images == 'crystal_image.tif'
     assert pgm_result.images == pgm_name
-    assert tiff_result.plot is not None
-    assert pgm_result.plot is not None
-    assert len(tiff_result.plot.figures) == 1
-    assert len(pgm_result.plot.figures) == 1
-    tiff_figure = tiff_result.plot.figures[0].figure
-    pgm_figure = pgm_result.plot.figures[0].figure
+    assert len(tiff_result.figures) == 1
+    assert len(pgm_result.figures) == 1
+    tiff_figure = tiff_result.figures[0].figure
+    pgm_figure = pgm_result.figures[0].figure
     assert tiff_figure['data'][0]['type'] == 'image'
     assert np.array_equal(np.asarray(tiff_figure['data'][0]['z']), tiff_values)
     assert pgm_figure['data'][0]['type'] == 'heatmap'

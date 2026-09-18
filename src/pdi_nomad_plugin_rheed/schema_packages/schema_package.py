@@ -2,6 +2,7 @@ import csv
 import os
 import posixpath
 import re
+from copy import deepcopy
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -9,7 +10,11 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from nomad.datamodel.data import ArchiveSection, EntryData
-from nomad.datamodel.metainfo.annotations import ELNComponentEnum
+from nomad.datamodel.metainfo.annotations import (
+    ELNComponentEnum,
+    Filter,
+    SectionDisplayAnnotation,
+)
 from nomad.datamodel.metainfo.basesections import Measurement, MeasurementResult
 from nomad.datamodel.metainfo.plot import PlotlyFigure, PlotSection
 from nomad.metainfo import (
@@ -180,7 +185,11 @@ class Sample(ArchiveSection):
 # ---------------------------------------------------------
 # 4. Result Sections
 # ---------------------------------------------------------
-class RHEEDResult(MeasurementResult):
+class RHEEDResult(MeasurementResult, PlotSection):
+    m_def = Section(
+        a_display=SectionDisplayAnnotation(visible=Filter(exclude=['figures']))
+    )
+
     result_type = Quantity(type=MEnum('video', 'image', 'scan_point'))
     datetime = Quantity(type=Datetime, a_eln=dict(component='DateTimeEditQuantity'))
 
@@ -206,6 +215,10 @@ class RHEEDResult(MeasurementResult):
 
 
 class RHEEDVideoResult(RHEEDResult):
+    m_def = Section(
+        a_display=SectionDisplayAnnotation(visible=Filter(exclude=['figures']))
+    )
+
     video_link = Quantity(type=str, a_eln=dict(component='StringEditQuantity'))
     start_time = Quantity(type=Datetime, a_eln=dict(component='DateTimeEditQuantity'))
     end_time = Quantity(type=Datetime, a_eln=dict(component='DateTimeEditQuantity'))
@@ -218,8 +231,11 @@ class RHEEDPlot(PlotSection):
 
 
 class RHEEDImageResult(RHEEDResult):
+    m_def = Section(
+        a_display=SectionDisplayAnnotation(visible=Filter(exclude=['figures']))
+    )
+
     images = Quantity(type=File, a_browser=dict(adaptor='RawFileAdaptor'))
-    plot = SubSection(section_def=RHEEDPlot)
     derived_from_video_link = Quantity(
         type=str, a_eln=dict(component='StringEditQuantity')
     )
@@ -235,11 +251,19 @@ class RHEEDSensor(ArchiveSection):
 class RHEEDSensors(PlotSection):
     """Point-scan sensors and their combined intensity plot."""
 
+    m_def = Section(
+        a_display=SectionDisplayAnnotation(visible=Filter(exclude=['figures']))
+    )
+
     sensors = SubSection(section_def=RHEEDSensor, repeats=True)
 
 
 class SensorPositionOverview(PlotSection):
     """Sensor-position overview raw file and its TIFF plot."""
+
+    m_def = Section(
+        a_display=SectionDisplayAnnotation(visible=Filter(exclude=['figures']))
+    )
 
     file = Quantity(type=File, a_browser=dict(adaptor='RawFileAdaptor'))
 
@@ -257,6 +281,10 @@ class PointScan(ArchiveSection):
 
 
 class RHEEDPointScanResult(RHEEDResult):
+    m_def = Section(
+        a_display=SectionDisplayAnnotation(visible=Filter(exclude=['figures']))
+    )
+
     point_scans = SubSection(section_def=PointScan, repeats=True)
 
 
@@ -707,7 +735,9 @@ class RHEEDMeasurement(Measurement, EntryData):
                 self._associate_scan_auxiliaries(
                     point_scan, start_time, end_time, all_files
                 )
-                self._populate_point_scan_plots(point_scan, mainfile_dir, logger)
+                self._populate_point_scan_plots(
+                    result, point_scan, mainfile_dir, logger
+                )
                 result.point_scans.append(point_scan)
                 result.datetime = start_time.isoformat()
                 self._match_scan_metadata(result, start_time, end_time, df_meta)
@@ -750,8 +780,7 @@ class RHEEDMeasurement(Measurement, EntryData):
             else:
                 return
 
-            result.plot = RHEEDPlot()
-            result.plot.figures.append(
+            result.figures.append(
                 PlotlyFigure(
                     label='RHEED image',
                     figure=go.Figure(data=[trace]).to_plotly_json(),
@@ -788,7 +817,7 @@ class RHEEDMeasurement(Measurement, EntryData):
             raise ValueError('PGM pixel count does not match its dimensions')
         return np.asarray(values).reshape(height, width)
 
-    def _populate_point_scan_plots(self, point_scan, mainfile_dir, logger):
+    def _populate_point_scan_plots(self, result, point_scan, mainfile_dir, logger):
         """Store sensor traces and an optional sensor-position overview in Plotly."""
         sensor_traces = [
             go.Scatter(
@@ -798,16 +827,18 @@ class RHEEDMeasurement(Measurement, EntryData):
             )
             for sensor in point_scan.sensors.sensors
         ]
+        sensor_figure = go.Figure(data=sensor_traces).update_layout(
+            showlegend=True,
+            xaxis_title='Time (s)',
+            yaxis_title='Intensity',
+        )
+        sensor_figure_json = sensor_figure.to_plotly_json()
         point_scan.sensors.figures.append(
+            PlotlyFigure(label='Sensor intensities', figure=sensor_figure_json)
+        )
+        result.figures.append(
             PlotlyFigure(
-                label='Sensor intensities',
-                figure=go.Figure(data=sensor_traces)
-                .update_layout(
-                    showlegend=True,
-                    xaxis_title='Time (s)',
-                    yaxis_title='Intensity',
-                )
-                .to_plotly_json(),
+                label='Sensor intensities', figure=deepcopy(sensor_figure_json)
             )
         )
 
@@ -818,10 +849,16 @@ class RHEEDMeasurement(Measurement, EntryData):
         try:
             overview_path = os.path.join(mainfile_dir, os.path.basename(overview.file))
             overview_trace = go.Image(z=self._read_tiff_array(overview_path))
+            overview_figure_json = go.Figure(data=[overview_trace]).to_plotly_json()
             overview.figures.append(
                 PlotlyFigure(
+                    label='Sensor position overview', figure=overview_figure_json
+                )
+            )
+            result.figures.append(
+                PlotlyFigure(
                     label='Sensor position overview',
-                    figure=go.Figure(data=[overview_trace]).to_plotly_json(),
+                    figure=deepcopy(overview_figure_json),
                 )
             )
         except Exception as error:
