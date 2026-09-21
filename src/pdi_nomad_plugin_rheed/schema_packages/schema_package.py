@@ -312,6 +312,13 @@ class RHEEDMeasurement(Measurement, EntryData):
     sample_ref = Quantity(
         type=ArchiveSection, a_eln=dict(component='ReferenceEditQuantity')
     )
+    rheed_settings_source = Quantity(
+        type=MEnum('local', 'linked_mbe'),
+        description=(
+            'Successful source of the RHEED settings. This parser-managed marker '
+            'prevents repeated fallback loads from overwriting later ELN edits.'
+        ),
+    )
     color_table = Quantity(type=File, a_browser=dict(adaptor='RawFileAdaptor'))
 
     instrument_settings = SubSection(section_def=InstrumentSettings)
@@ -319,27 +326,44 @@ class RHEEDMeasurement(Measurement, EntryData):
 
     def normalize(self, archive, logger):
         """Main trigger: locates uploaded files in the server context and starts the parsing process."""
-        local_excel_loaded = None
-        if self.data_file and not self.results:
-            try:
-                with archive.m_context.raw_file(self.data_file, 'r') as f:
-                    mainfile_path = f.name
-                mainfile_dir = os.path.dirname(mainfile_path)
-                all_files = os.listdir(mainfile_dir)
-                local_excel_loaded = self._parse_all_data(
-                    mainfile_path, mainfile_dir, all_files, logger
+        mainfile_data = self._get_mainfile_data(archive, logger)
+        local_excel_loaded = self.rheed_settings_source == 'local'
+        if mainfile_data:
+            mainfile_path, mainfile_dir, all_files = mainfile_data
+            if not self.results:
+                try:
+                    local_excel_loaded = self._parse_all_data(
+                        mainfile_path, mainfile_dir, all_files, logger
+                    )
+                except Exception as e:
+                    if logger:
+                        logger.error(f'Error parsing RHEED metadata CSV: {e}')
+            elif self.rheed_settings_source is None:
+                local_excel_loaded = self._parse_excel_settings(
+                    mainfile_dir, all_files, logger, preserve_existing=True
                 )
-            except Exception as e:
-                if logger:
-                    logger.error(f'Error parsing RHEED metadata CSV: {e}')
 
         self._autogenerate_measurement_id()
         self._link_mbe_experiment(archive, logger)
-        if local_excel_loaded is False:
+        if not local_excel_loaded and self.rheed_settings_source != 'linked_mbe':
             self._parse_linked_mbe_excel_settings(logger)
         super().normalize(archive, logger)
         for result in self.results:
             result._populate_sample_phi()
+
+    def _get_mainfile_data(self, archive, logger):
+        """Return the local mainfile path and sibling files without parsing results."""
+        if not self.data_file:
+            return None
+        try:
+            with archive.m_context.raw_file(self.data_file, 'r') as file:
+                mainfile_path = file.name
+            mainfile_dir = os.path.dirname(mainfile_path)
+            return mainfile_path, mainfile_dir, os.listdir(mainfile_dir)
+        except Exception as error:
+            if logger:
+                logger.error(f'Could not access RHEED metadata CSV: {error}')
+            return None
 
     @staticmethod
     def _derive_growth_id(sample_id, holder_position):
@@ -500,7 +524,9 @@ class RHEEDMeasurement(Measurement, EntryData):
         except ValueError:
             return pd.NaT
 
-    def _parse_excel_settings(self, mainfile_dir, all_files, logger):
+    def _parse_excel_settings(
+        self, mainfile_dir, all_files, logger, preserve_existing=False
+    ):
         """Extracts static instrument configurations from the MBE Excel file."""
         excel_files = [f for f in all_files if f.endswith('.xlsx') and 'MBE' in f]
         if not excel_files:
@@ -511,7 +537,12 @@ class RHEEDMeasurement(Measurement, EntryData):
             df_excel = pd.read_excel(
                 excel_path, sheet_name='RHEED settings', header=None
             )
-            return self._populate_excel_settings(df_excel, logger)
+            return self._populate_excel_settings(
+                df_excel,
+                logger,
+                source='local',
+                preserve_existing=preserve_existing,
+            )
         except Exception as error:
             if logger:
                 logger.warning(f'Could not parse local Excel settings: {error}')
@@ -538,7 +569,12 @@ class RHEEDMeasurement(Measurement, EntryData):
                 df_excel = pd.read_excel(
                     excel_file, sheet_name='RHEED settings', header=None
                 )
-            return self._populate_excel_settings(df_excel, logger)
+            return self._populate_excel_settings(
+                df_excel,
+                logger,
+                source='linked_mbe',
+                preserve_existing=True,
+            )
         except Exception as error:
             if logger:
                 logger.warning(
@@ -546,7 +582,9 @@ class RHEEDMeasurement(Measurement, EntryData):
                 )
             return False
 
-    def _populate_excel_settings(self, df_excel, logger):  # noqa: PLR0912
+    def _populate_excel_settings(  # noqa: PLR0912
+        self, df_excel, logger, source, preserve_existing=False
+    ):
         """Populate static RHEED settings from the documented field/value rows."""
         if logger:
             logger.info(f'Loaded {len(df_excel)} rows from RHEED settings.')
@@ -601,11 +639,52 @@ class RHEEDMeasurement(Measurement, EntryData):
             if camera_values['resolution_y_px'] is not None:
                 settings.camera.resolution_y_px = int(camera_values['resolution_y_px'])
 
-        self.instrument_settings = settings
         offset = self._safe_float(values.get('sample_phi_holder_alpha_deg'))
-        if offset is not None:
-            self.sample_phi_holder_alpha_deg = offset
+        if preserve_existing:
+            self._merge_excel_settings(settings, offset)
+        else:
+            self.instrument_settings = settings
+            if offset is not None:
+                self.sample_phi_holder_alpha_deg = offset
+        self.rheed_settings_source = source
         return True
+
+    def _merge_excel_settings(self, settings, offset):  # noqa: PLR0912
+        """Fill missing settings from a workbook without replacing ELN values."""
+        if self.instrument_settings is None:
+            self.instrument_settings = settings
+        else:
+            current = self.instrument_settings
+            if (
+                current.electronics_type is None
+                and settings.electronics_type is not None
+            ):
+                current.electronics_type = settings.electronics_type
+
+            if settings.chamber_geometry:
+                if current.chamber_geometry is None:
+                    current.chamber_geometry = settings.chamber_geometry
+                elif current.chamber_geometry.distance_sample_to_screen_mm is None:
+                    current.chamber_geometry.distance_sample_to_screen_mm = (
+                        settings.chamber_geometry.distance_sample_to_screen_mm
+                    )
+
+            if settings.camera:
+                if current.camera is None:
+                    current.camera = settings.camera
+                else:
+                    for field in (
+                        'image_length_calibration_mm_per_px',
+                        'resolution_x_px',
+                        'resolution_y_px',
+                    ):
+                        if getattr(current.camera, field) is None:
+                            value = getattr(settings.camera, field)
+                            if value is not None:
+                                setattr(current.camera, field, value)
+
+        if self.sample_phi_holder_alpha_deg is None and offset is not None:
+            self.sample_phi_holder_alpha_deg = offset
 
     def _parse_rotation_log(self, mainfile_dir, logger):  # noqa: PLR0912
         """Discover and read a timestamped EPIC rotation-angle log."""

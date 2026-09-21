@@ -14,6 +14,7 @@ from PIL import Image
 
 from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
     IMAGE_PREVIEW_MAX_DIMENSION,
+    InstrumentSettings,
     PointScan,
     RHEEDImageResult,
     RHEEDMeasurement,
@@ -205,9 +206,7 @@ def _write_synthetic_inputs(tmp_path):
     return metadata_path
 
 
-def _normalize_synthetic_measurement(
-    tmp_path, prepare_files=None, logger=None, data_file=None
-):
+def _synthetic_measurement_archive(tmp_path, prepare_files=None, data_file=None):
     metadata_path = _write_synthetic_inputs(tmp_path)
     if prepare_files:
         prepare_files(tmp_path)
@@ -232,6 +231,15 @@ def _normalize_synthetic_measurement(
         yield MockFile()
 
     archive.m_context.raw_file.side_effect = mock_raw_file
+    return measurement, archive
+
+
+def _normalize_synthetic_measurement(
+    tmp_path, prepare_files=None, logger=None, data_file=None
+):
+    measurement, archive = _synthetic_measurement_archive(
+        tmp_path, prepare_files, data_file
+    )
     measurement.normalize(archive, logger or get_logger(__name__))
     return measurement
 
@@ -549,6 +557,12 @@ def test_raw_file_quantities_use_nomad_file_references(tmp_path):
         RHEEDMeasurement.m_def.all_quantities['data_file'].type.standard_type() == 'str'
     )
     assert not isinstance(RHEEDMeasurement.m_def.all_quantities['data_file'].type, File)
+    assert (
+        'eln'
+        not in RHEEDMeasurement.m_def.all_quantities[
+            'rheed_settings_source'
+        ].m_annotations
+    )
     assert isinstance(RHEEDImageResult.m_def.all_quantities['images'].type, File)
     assert 'plot' not in RHEEDImageResult.m_def.all_sub_sections
     assert RHEEDResult.m_def.a_display.visible.exclude == ['figures']
@@ -898,6 +912,7 @@ def test_local_excel_settings_take_priority_over_linked_experiment(tmp_path):
 
     assert measurement.instrument_settings.electronics_type == 'FUG'
     assert measurement.sample_phi_holder_alpha_deg == 27.5  # noqa: PLR2004
+    assert measurement.rheed_settings_source == 'local'
     parse_linked_settings.assert_not_called()
 
 
@@ -922,6 +937,7 @@ def test_loads_rheed_settings_from_linked_experiment_data_file(tmp_path):
     assert settings.camera.resolution_x_px == 640  # noqa: PLR2004
     assert settings.camera.resolution_y_px == 480  # noqa: PLR2004
     assert measurement.sample_phi_holder_alpha_deg == 63.5  # noqa: PLR2004
+    assert measurement.rheed_settings_source == 'linked_mbe'
     remote_context.raw_file.assert_called_once_with(
         'growth/shared_rheed_settings.xlsx', 'rb'
     )
@@ -959,6 +975,219 @@ def test_missing_local_and_linked_excel_settings_does_not_interrupt_normalizatio
     assert len(measurement.results) == 4  # noqa: PLR2004
     assert measurement.instrument_settings is None
     assert measurement.sample_phi_holder_alpha_deg is None
+    assert measurement.rheed_settings_source is None
+
+
+def test_reprocessing_late_mbe_link_loads_settings_without_rebuilding_results(tmp_path):
+    def prepare_files(directory):
+        (directory / 'MBE42_config_w_RHEED.xlsx').unlink()
+
+    measurement, archive = _synthetic_measurement_archive(tmp_path, prepare_files)
+    existing_result = RHEEDImageResult(
+        name='existing_image.tif',
+        result_type='image',
+        sample=Sample(sample_id='synthetic_growth_A'),
+        substrate_holder=SubstrateHolder(position_measured='A'),
+    )
+    measurement.results.append(existing_result)
+    archive.metadata.main_author = 'synthetic-user'
+    no_matches = MagicMock(data=[])
+
+    with patch(
+        'pdi_nomad_plugin_rheed.schema_packages.schema_package._search_nomad_entries',
+        return_value=no_matches,
+    ):
+        measurement.normalize(archive, get_logger(__name__))
+
+    assert len(measurement.results) == 1
+    assert measurement.results[0] is existing_result
+    assert measurement.mbe_experiment_ref is None
+    assert measurement.rheed_settings_source is None
+
+    experiment, _ = _synthetic_linked_experiment(tmp_path, 63.5)
+    match = MagicMock(
+        data=[{'upload_id': 'synthetic-mbe-upload', 'entry_id': 'synthetic-mbe-entry'}]
+    )
+    with (
+        patch(
+            'pdi_nomad_plugin_rheed.schema_packages.schema_package._search_nomad_entries',
+            return_value=match,
+        ),
+        patch.object(
+            RHEEDMeasurement, '_get_linked_mbe_experiment', return_value=experiment
+        ),
+    ):
+        measurement.normalize(archive, get_logger(__name__))
+
+    assert len(measurement.results) == 1
+    assert measurement.results[0] is existing_result
+    assert measurement.m_to_dict()['mbe_experiment_ref'] == (
+        '../uploads/synthetic-mbe-upload/archive/synthetic-mbe-entry#data'
+    )
+    assert measurement.rheed_settings_source == 'linked_mbe'
+    assert measurement.instrument_settings.electronics_type == 'STAIB'
+    assert measurement.sample_phi_holder_alpha_deg == 63.5  # noqa: PLR2004
+
+
+def test_late_linked_settings_preserve_manual_reference_and_values(tmp_path):
+    def prepare_files(directory):
+        (directory / 'MBE42_config_w_RHEED.xlsx').unlink()
+
+    measurement, archive = _synthetic_measurement_archive(tmp_path, prepare_files)
+    measurement.results.append(
+        RHEEDImageResult(
+            name='existing_image.tif',
+            result_type='image',
+            sample=Sample(sample_id='synthetic_growth_A'),
+            substrate_holder=SubstrateHolder(position_measured='A'),
+        )
+    )
+    manual_reference = '../uploads/manual/archive/experiment#data'
+    measurement.mbe_experiment_ref = manual_reference
+    measurement.instrument_settings = InstrumentSettings(electronics_type='FUG')
+    measurement.sample_phi_holder_alpha_deg = 41.5
+    experiment, _ = _synthetic_linked_experiment(tmp_path, 63.5)
+
+    with (
+        patch.object(
+            RHEEDMeasurement, '_get_linked_mbe_experiment', return_value=experiment
+        ),
+        patch(
+            'pdi_nomad_plugin_rheed.schema_packages.schema_package._search_nomad_entries'
+        ) as search_entries,
+    ):
+        measurement.normalize(archive, get_logger(__name__))
+
+    assert measurement.m_to_dict()['mbe_experiment_ref'] == manual_reference
+    assert measurement.rheed_settings_source == 'linked_mbe'
+    assert measurement.instrument_settings.electronics_type == 'FUG'
+    assert (
+        measurement.instrument_settings.chamber_geometry.distance_sample_to_screen_mm
+        == 615.25  # noqa: PLR2004
+    )
+    assert measurement.instrument_settings.camera.resolution_x_px == 640  # noqa: PLR2004
+    assert measurement.sample_phi_holder_alpha_deg == 41.5  # noqa: PLR2004
+    search_entries.assert_not_called()
+
+
+def test_failed_linked_settings_fallback_retries_on_later_normalization(tmp_path):
+    def prepare_files(directory):
+        (directory / 'MBE42_config_w_RHEED.xlsx').unlink()
+
+    measurement, archive = _synthetic_measurement_archive(tmp_path, prepare_files)
+    measurement.results.append(
+        RHEEDImageResult(
+            name='existing_image.tif',
+            result_type='image',
+            sample=Sample(sample_id='synthetic_growth_A'),
+            substrate_holder=SubstrateHolder(position_measured='A'),
+        )
+    )
+    measurement.mbe_experiment_ref = '../uploads/manual/archive/experiment#data'
+    failed_experiment = SimpleNamespace(data_file=None)
+    experiment, _ = _synthetic_linked_experiment(tmp_path, 63.5)
+
+    with patch.object(
+        RHEEDMeasurement,
+        '_get_linked_mbe_experiment',
+        side_effect=[failed_experiment, experiment],
+    ):
+        measurement.normalize(archive, get_logger(__name__))
+        assert measurement.rheed_settings_source is None
+
+        measurement.normalize(archive, get_logger(__name__))
+
+    assert measurement.rheed_settings_source == 'linked_mbe'
+    assert measurement.instrument_settings.electronics_type == 'STAIB'
+
+
+def test_successful_linked_settings_fallback_does_not_reapply_on_reprocessing(tmp_path):
+    def prepare_files(directory):
+        (directory / 'MBE42_config_w_RHEED.xlsx').unlink()
+
+    measurement, archive = _synthetic_measurement_archive(tmp_path, prepare_files)
+    existing_result = RHEEDImageResult(
+        name='existing_image.tif',
+        result_type='image',
+        sample=Sample(sample_id='synthetic_growth_A'),
+        substrate_holder=SubstrateHolder(position_measured='A'),
+    )
+    measurement.results.append(existing_result)
+    measurement.mbe_experiment_ref = '../uploads/manual/archive/experiment#data'
+    experiment, remote_context = _synthetic_linked_experiment(tmp_path, 63.5)
+
+    with patch.object(
+        RHEEDMeasurement, '_get_linked_mbe_experiment', return_value=experiment
+    ):
+        measurement.normalize(archive, get_logger(__name__))
+        measurement.instrument_settings.electronics_type = 'FUG'
+        measurement.sample_phi_holder_alpha_deg = 41.5
+        remote_context.raw_file.reset_mock()
+
+        measurement.normalize(archive, get_logger(__name__))
+
+    assert len(measurement.results) == 1
+    assert measurement.results[0] is existing_result
+    assert measurement.rheed_settings_source == 'linked_mbe'
+    assert measurement.instrument_settings.electronics_type == 'FUG'
+    assert measurement.sample_phi_holder_alpha_deg == 41.5  # noqa: PLR2004
+    remote_context.raw_file.assert_not_called()
+
+
+def test_linked_settings_provenance_remains_truthful_when_local_xlsx_appears(
+    tmp_path,
+):
+    def prepare_files(directory):
+        (directory / 'MBE42_config_w_RHEED.xlsx').unlink()
+
+    measurement, archive = _synthetic_measurement_archive(tmp_path, prepare_files)
+    existing_result = RHEEDImageResult(
+        name='existing_image.tif',
+        result_type='image',
+        sample=Sample(sample_id='synthetic_growth_A'),
+        substrate_holder=SubstrateHolder(position_measured='A'),
+    )
+    measurement.results.append(existing_result)
+    measurement.mbe_experiment_ref = '../uploads/manual/archive/experiment#data'
+    experiment, remote_context = _synthetic_linked_experiment(tmp_path, 63.5)
+
+    with patch.object(
+        RHEEDMeasurement, '_get_linked_mbe_experiment', return_value=experiment
+    ):
+        measurement.normalize(archive, get_logger(__name__))
+
+        measurement.instrument_settings.electronics_type = 'FUG'
+        measurement.sample_phi_holder_alpha_deg = 41.5
+        _write_rheed_settings_workbook(
+            tmp_path / 'MBE42_config_w_RHEED.xlsx',
+            {
+                'electronics_type': 'STAIB',
+                'distance': 999.0,
+                'calibration': 0.99,
+                'resolution_x': 999,
+                'resolution_y': 998,
+                'holder_offset': 98.5,
+            },
+        )
+        remote_context.raw_file.reset_mock()
+        with patch.object(
+            measurement,
+            '_parse_excel_settings',
+            wraps=measurement._parse_excel_settings,
+        ) as parse_local_settings:
+            measurement.normalize(archive, get_logger(__name__))
+
+    assert len(measurement.results) == 1
+    assert measurement.results[0] is existing_result
+    assert measurement.rheed_settings_source == 'linked_mbe'
+    assert measurement.instrument_settings.electronics_type == 'FUG'
+    assert (
+        measurement.instrument_settings.chamber_geometry.distance_sample_to_screen_mm
+        == 615.25  # noqa: PLR2004
+    )
+    assert measurement.sample_phi_holder_alpha_deg == 41.5  # noqa: PLR2004
+    parse_local_settings.assert_not_called()
+    remote_context.raw_file.assert_not_called()
 
 
 def test_parses_rotation_log_and_assigns_automatic_result(tmp_path):
