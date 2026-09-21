@@ -31,6 +31,7 @@ from PIL import Image
 m_package = SchemaPackage()
 SOURCE_TIMEZONE = ZoneInfo('Europe/Berlin')
 MBE_EXPERIMENT_LAB_ID = 'data.lab_id#pdi_nomad_plugin.mbe.processes.ExperimentMbePDI'
+IMAGE_PREVIEW_MAX_DIMENSION = 512
 
 
 def _search_nomad_entries(owner, user_id, query):
@@ -826,9 +827,13 @@ class RHEEDMeasurement(Measurement, EntryData):
         try:
             image_path = os.path.join(mainfile_dir, fname)
             if fname.lower().endswith('.pgm'):
-                trace = go.Heatmap(z=self._read_ascii_pgm(image_path))
+                trace = go.Heatmap(
+                    z=self._downsample_preview_array(self._read_ascii_pgm(image_path))
+                )
             elif fname.lower().endswith(('.tif', '.tiff')):
-                trace = go.Image(z=self._read_tiff_array(image_path))
+                trace = go.Image(
+                    z=self._downsample_preview_array(self._read_tiff_array(image_path))
+                )
             else:
                 return
 
@@ -869,6 +874,22 @@ class RHEEDMeasurement(Measurement, EntryData):
             raise ValueError('PGM pixel count does not match its dimensions')
         return np.asarray(values).reshape(height, width)
 
+    @staticmethod
+    def _downsample_preview_array(array):
+        """Bound a 2D or RGB(A) preview with deterministic index sampling."""
+        preview_array = np.asarray(array)
+        height, width = preview_array.shape[:2]
+        largest_dimension = max(height, width)
+        if largest_dimension <= IMAGE_PREVIEW_MAX_DIMENSION:
+            return preview_array
+
+        scale = IMAGE_PREVIEW_MAX_DIMENSION / largest_dimension
+        preview_height = max(1, int(height * scale))
+        preview_width = max(1, int(width * scale))
+        row_indices = np.linspace(0, height - 1, preview_height, dtype=int)
+        column_indices = np.linspace(0, width - 1, preview_width, dtype=int)
+        return preview_array[row_indices][:, column_indices]
+
     def _populate_point_scan_plots(self, result, point_scan, mainfile_dir, logger):
         """Store sensor traces and an optional sensor-position overview in Plotly."""
         sensor_traces = [
@@ -900,7 +921,9 @@ class RHEEDMeasurement(Measurement, EntryData):
 
         try:
             overview_path = os.path.join(mainfile_dir, os.path.basename(overview.file))
-            overview_trace = go.Image(z=self._read_tiff_array(overview_path))
+            overview_trace = go.Image(
+                z=self._downsample_preview_array(self._read_tiff_array(overview_path))
+            )
             overview_figure_json = go.Figure(data=[overview_trace]).to_plotly_json()
             overview.figures.append(
                 PlotlyFigure(

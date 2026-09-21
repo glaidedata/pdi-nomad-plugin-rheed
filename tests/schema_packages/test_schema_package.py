@@ -13,6 +13,7 @@ from openpyxl import Workbook
 from PIL import Image
 
 from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
+    IMAGE_PREVIEW_MAX_DIMENSION,
     PointScan,
     RHEEDImageResult,
     RHEEDMeasurement,
@@ -806,6 +807,75 @@ def test_stores_tiff_and_pgm_plotly_previews_with_raw_references(
     assert np.array_equal(
         np.asarray(pgm_figure['data'][0]['z']), np.array([[1, 12], [3, 4]])
     )
+
+
+def test_bounds_large_tiff_and_pgm_plotly_previews(tmp_path):
+    tiff_values = np.arange(800 * 1200 * 3, dtype=np.uint8).reshape(800, 1200, 3)
+    pgm_values = np.arange(600 * 800, dtype=int).reshape(600, 800) % 1000
+    pgm_name = 'large_2042-05-06___07-08-13.500.pgm'
+
+    def prepare_files(directory):
+        Image.fromarray(tiff_values).save(directory / 'crystal_image.tif')
+        with (directory / pgm_name).open('w', encoding='ascii') as pgm_file:
+            pgm_file.write('P2\n800 600\n255\n')
+            np.savetxt(pgm_file, pgm_values, fmt='%d')
+
+    measurement = _normalize_synthetic_measurement(tmp_path, prepare_files)
+    results = {result.name: result for result in measurement.results}
+    tiff_result = results['crystal_image.tif']
+    pgm_result = results[pgm_name]
+    tiff_preview = np.asarray(tiff_result.figures[0].figure['data'][0]['z'])
+    pgm_preview = np.asarray(pgm_result.figures[0].figure['data'][0]['z'])
+
+    assert IMAGE_PREVIEW_MAX_DIMENSION == 512  # noqa: PLR2004
+    assert tiff_result.images == 'crystal_image.tif'
+    assert tiff_result.figures[0].figure['data'][0]['type'] == 'image'
+    assert tiff_preview.shape[2] == 3  # noqa: PLR2004
+    assert max(tiff_preview.shape[:2]) <= IMAGE_PREVIEW_MAX_DIMENSION
+    assert tiff_preview.shape != tiff_values.shape
+    assert np.array_equal(tiff_preview[0, 0], tiff_values[0, 0])
+    assert np.array_equal(tiff_preview[-1, -1], tiff_values[-1, -1])
+    assert (
+        abs(
+            (tiff_preview.shape[1] / tiff_preview.shape[0])
+            - (tiff_values.shape[1] / tiff_values.shape[0])
+        )
+        < 0.01  # noqa: PLR2004
+    )
+
+    assert pgm_result.images == pgm_name
+    assert pgm_result.figures[0].figure['data'][0]['type'] == 'heatmap'
+    assert max(pgm_preview.shape) <= IMAGE_PREVIEW_MAX_DIMENSION
+    assert pgm_preview.shape != pgm_values.shape
+    assert pgm_preview.dtype == pgm_values.dtype
+    assert pgm_preview.max() > 255  # noqa: PLR2004
+
+
+def test_bounds_point_scan_overview_preview_in_nested_and_result_figures(tmp_path):
+    overview_values = np.arange(800 * 1200 * 3, dtype=np.uint8).reshape(800, 1200, 3)
+
+    def prepare_files(directory):
+        Image.fromarray(overview_values).save(
+            directory / 'sensor_overview_2042-05-06___07-08-09.750.tif'
+        )
+
+    measurement = _normalize_synthetic_measurement(tmp_path, prepare_files)
+    scan_result = next(
+        result for result in measurement.results if result.name == 'sweep.asc'
+    )
+    point_scan = scan_result.point_scans[0]
+    nested_preview = np.asarray(
+        point_scan.sensor_position_overview_picture.figures[0].figure['data'][0]['z']
+    )
+    result_preview = np.asarray(scan_result.figures[1].figure['data'][0]['z'])
+
+    assert point_scan.sensor_position_overview_picture.file == (
+        'sensor_overview_2042-05-06___07-08-09.750.tif'
+    )
+    assert max(nested_preview.shape[:2]) <= IMAGE_PREVIEW_MAX_DIMENSION
+    assert max(result_preview.shape[:2]) <= IMAGE_PREVIEW_MAX_DIMENSION
+    assert nested_preview.shape != overview_values.shape
+    assert np.array_equal(nested_preview, result_preview)
 
 
 def test_parses_global_rheed_settings_from_excel(tmp_path):
