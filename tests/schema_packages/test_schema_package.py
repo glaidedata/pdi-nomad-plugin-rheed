@@ -82,6 +82,36 @@ def _write_rheed_settings_workbook(path, values=None):
     workbook.save(path)
 
 
+def _write_synthetic_point_scan(path, recorded_at='2042-05-06   07:08:09.500'):
+    path.write_text(
+        f'Recorded at {recorded_at}\n'
+        'Time [s] Sensor A Sensor B\n'
+        '71001 71002\n\n'
+        '-0.000 1.5 2.5\n'
+        '1.000 3.5 4.5\n',
+        encoding='utf-8',
+    )
+
+
+def _append_synthetic_metadata_rows(directory, rows):
+    metadata_path = directory / 'nova_C_RHEED_meta_synthetic.csv'
+    with metadata_path.open(encoding='utf-8', newline='') as metadata_file:
+        reader = csv.DictReader(metadata_file)
+        fieldnames = reader.fieldnames
+        existing_rows = list(reader)
+
+    with metadata_path.open('w', encoding='utf-8', newline='') as metadata_file:
+        writer = csv.DictWriter(metadata_file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(existing_rows)
+        writer.writerows(
+            [
+                {fieldname: row.get(fieldname, '') for fieldname in fieldnames}
+                for row in rows
+            ]
+        )
+
+
 def _write_synthetic_inputs(tmp_path):
     metadata_path = tmp_path / 'nova_C_RHEED_meta_synthetic.csv'
     fieldnames = [
@@ -151,14 +181,7 @@ def _write_synthetic_inputs(tmp_path):
         writer.writerows(rows)
 
     (tmp_path / 'crystal_image.tif').write_bytes(b'synthetic image bytes')
-    (tmp_path / 'sweep.asc').write_text(
-        'Recorded at 2042-05-06   07:08:09.500\n'
-        'Time [s] Sensor A Sensor B\n'
-        '71001 71002\n\n'
-        '-0.000 1.5 2.5\n'
-        '1.000 3.5 4.5\n',
-        encoding='utf-8',
-    )
+    _write_synthetic_point_scan(tmp_path / 'sweep.asc')
     (tmp_path / 'sensors_2042-05-06___07-08-08.000.sn').write_text(
         '[Sensor 0]\nType=Rect Area\n', encoding='utf-8'
     )
@@ -366,6 +389,104 @@ def test_broken_point_scan_overview_does_not_suppress_sensor_plot(tmp_path):
         'Could not create point-scan overview preview' in call.args[0]
         for call in logger.warning.call_args_list
     )
+
+
+def test_explicit_asc_and_csv_point_scans_use_metadata_and_rotation_precedence(
+    tmp_path,
+):
+    def prepare_files(directory):
+        _write_synthetic_point_scan(
+            directory / 'explicit_scan.asc', '2042-05-06   07:08:12.250'
+        )
+        _write_synthetic_point_scan(
+            directory / 'explicit_scan.csv', '2042-05-06   07:08:11.500'
+        )
+        _append_synthetic_metadata_rows(
+            directory,
+            [
+                {
+                    'file_name': 'nested/explicit_scan.asc',
+                    'm8_id': 'explicit_asc_A',
+                    'date': '2042-05-06',
+                    'time': '07-08-00.000',
+                    'mani_angle': '0',
+                    'comments': 'invented explicit ASC metadata',
+                },
+                {
+                    'file_name': 'nested/explicit_scan.csv',
+                    'm8_id': 'explicit_csv_B',
+                    'date': '2042-05-06',
+                    'time': '07-08-00.000',
+                    'mani_angle': '-1',
+                    'comments': 'invented explicit CSV metadata',
+                },
+            ],
+        )
+
+    measurement = _normalize_synthetic_measurement(tmp_path, prepare_files)
+    results = {result.name: result for result in measurement.results}
+    asc_result = results['explicit_scan.asc']
+    csv_result = results['explicit_scan.csv']
+
+    assert asc_result.sample.sample_id == 'explicit_asc_A'
+    assert asc_result.notes == 'invented explicit ASC metadata'
+    assert asc_result.datetime == datetime(2042, 5, 6, 5, 8, 12, 250000, tzinfo=UTC)
+    assert asc_result.substrate_holder.rotation_angle_alpha_deg == 0
+    assert len(asc_result.point_scans) == 1
+    assert len(asc_result.point_scans[0].sensors.sensors) == 2  # noqa: PLR2004
+    assert len(asc_result.figures) == 2  # noqa: PLR2004
+
+    assert csv_result.sample.sample_id == 'explicit_csv_B'
+    assert csv_result.notes == 'invented explicit CSV metadata'
+    assert csv_result.datetime == datetime(2042, 5, 6, 5, 8, 11, 500000, tzinfo=UTC)
+    assert csv_result.substrate_holder.rotation_angle_alpha_deg == 13.25  # noqa: PLR2004
+    assert len(csv_result.point_scans) == 1
+    assert len(csv_result.point_scans[0].sensors.sensors) == 2  # noqa: PLR2004
+    assert len(csv_result.figures) == 2  # noqa: PLR2004
+
+
+def test_discovers_unassigned_csv_point_scan_and_excludes_master_metadata(tmp_path):
+    scan_name = 'sensor_scan.csv'
+
+    def prepare_files(directory):
+        _write_synthetic_point_scan(directory / scan_name, '2042-05-06   07:08:09.600')
+
+    measurement = _normalize_synthetic_measurement(tmp_path, prepare_files)
+    results = {result.name: result for result in measurement.results}
+
+    assert scan_name in results
+    assert results[scan_name].sample.sample_id == 'nova_D'
+    assert len(results[scan_name].point_scans) == 1
+    assert len(results[scan_name].point_scans[0].sensors.figures) == 1
+    assert len(results[scan_name].figures) == 2  # noqa: PLR2004
+    assert 'nova_C_RHEED_meta_synthetic.csv' not in results
+    assert {
+        result.name
+        for result in measurement.results
+        if result.result_type == 'scan_point'
+    } == {'sweep.asc', scan_name}
+
+
+def test_invalid_explicit_point_scan_does_not_create_empty_result(tmp_path):
+    invalid_name = 'invalid_scan.asc'
+
+    def prepare_files(directory):
+        (directory / invalid_name).write_text('not a point scan', encoding='utf-8')
+        _append_synthetic_metadata_rows(
+            directory,
+            [
+                {
+                    'file_name': f'nested/{invalid_name}',
+                    'm8_id': 'invalid_A',
+                    'date': '2042-05-06',
+                    'time': '07-08-00.000',
+                }
+            ],
+        )
+
+    measurement = _normalize_synthetic_measurement(tmp_path, prepare_files)
+
+    assert invalid_name not in {result.name for result in measurement.results}
 
 
 def test_extracts_holder_position_from_final_sample_id_suffix(tmp_path):

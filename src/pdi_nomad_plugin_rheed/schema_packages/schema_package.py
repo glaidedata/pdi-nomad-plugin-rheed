@@ -437,7 +437,13 @@ class RHEEDMeasurement(Measurement, EntryData):
             df_meta, df_rot, mainfile_dir, all_files, logger
         )
         self._process_unassigned_files(
-            df_meta, df_rot, mainfile_dir, all_files, assigned_files, logger
+            df_meta,
+            df_rot,
+            mainfile_dir,
+            all_files,
+            assigned_files,
+            os.path.basename(mainfile_path),
+            logger,
         )
         return self._parse_excel_settings(mainfile_dir, all_files, logger)
 
@@ -691,6 +697,17 @@ class RHEEDMeasurement(Measurement, EntryData):
             if source_name and source_name != 'nan':
                 fname = os.path.basename(source_name.replace('\\', '/'))
                 assigned_files.add(fname)
+                if fname.lower().endswith(('.asc', '.csv')):
+                    self._process_point_scan_file(
+                        fname,
+                        mainfile_dir,
+                        all_files,
+                        df_rot,
+                        logger,
+                        explicit_row=row,
+                    )
+                    continue
+
                 result = self._create_result_instance(fname, all_files)
                 if not result:
                     continue
@@ -713,36 +730,35 @@ class RHEEDMeasurement(Measurement, EntryData):
         return assigned_files
 
     def _process_unassigned_files(  # noqa: PLR0913, PLR0917
-        self, df_meta, df_rot, mainfile_dir, all_files, assigned_files, logger
+        self,
+        df_meta,
+        df_rot,
+        mainfile_dir,
+        all_files,
+        assigned_files,
+        metadata_filename,
+        logger,
     ):
         """Scans the upload folder for supported files not named by CSV rows."""
         time_pattern = re.compile(r'(\d{4}-\d{2}-\d{2}___\d{2}-\d{2}-\d{2}\.\d{3})')
         unassigned = [
             f
             for f in all_files
-            if f not in assigned_files and f.endswith(('.tif', '.pgm', '.asc'))
+            if f != metadata_filename
+            and f not in assigned_files
+            and f.lower().endswith(('.tif', '.pgm', '.asc', '.csv'))
         ]
 
         for fname in unassigned:
-            if fname.endswith('.asc'):
-                result = self._create_result_instance(fname, all_files)
-                point_scan, start_time, end_time = self._parse_point_scan(
-                    os.path.join(mainfile_dir, fname), logger
+            if fname.lower().endswith(('.asc', '.csv')):
+                self._process_point_scan_file(
+                    fname,
+                    mainfile_dir,
+                    all_files,
+                    df_rot,
+                    logger,
+                    metadata=df_meta,
                 )
-                if point_scan is None:
-                    continue
-
-                self._associate_scan_auxiliaries(
-                    point_scan, start_time, end_time, all_files
-                )
-                self._populate_point_scan_plots(
-                    result, point_scan, mainfile_dir, logger
-                )
-                result.point_scans.append(point_scan)
-                result.datetime = start_time.isoformat()
-                self._match_scan_metadata(result, start_time, end_time, df_meta)
-                self._match_unassigned_rotation(result, start_time, df_rot)
-                self.results.append(result)
                 continue
 
             match = time_pattern.search(fname)
@@ -765,6 +781,42 @@ class RHEEDMeasurement(Measurement, EntryData):
 
             self.results.append(result)
             self._populate_image_plot(result, mainfile_dir, fname, logger)
+
+    def _process_point_scan_file(  # noqa: PLR0913, PLR0917
+        self,
+        fname,
+        mainfile_dir,
+        all_files,
+        df_rot,
+        logger,
+        explicit_row=None,
+        metadata=None,
+    ):
+        """Parse and finish one explicit or unassigned point-scan result."""
+        result = self._create_result_instance(fname, all_files)
+        if not isinstance(result, RHEEDPointScanResult):
+            return
+
+        point_scan, start_time, end_time = self._parse_point_scan(
+            os.path.join(mainfile_dir, fname), logger
+        )
+        if point_scan is None:
+            return
+
+        self._associate_scan_auxiliaries(point_scan, start_time, end_time, all_files)
+        result.point_scans.append(point_scan)
+        result.datetime = start_time.isoformat()
+        if explicit_row is not None:
+            self._populate_schema_from_row(result, explicit_row)
+            explicit_alpha = self._safe_float(explicit_row.get('mani_angle'))
+            if explicit_alpha is None or explicit_alpha == -1:
+                self._match_unassigned_rotation(result, start_time, df_rot)
+        elif metadata is not None:
+            self._match_scan_metadata(result, start_time, end_time, metadata)
+            self._match_unassigned_rotation(result, start_time, df_rot)
+
+        self._populate_point_scan_plots(result, point_scan, mainfile_dir, logger)
+        self.results.append(result)
 
     def _populate_image_plot(self, result, mainfile_dir, fname, logger):
         """Store a TIFF image or PGM intensity array in a Plotly figure."""
@@ -1114,19 +1166,20 @@ class RHEEDMeasurement(Measurement, EntryData):
     def _create_result_instance(self, fname, all_files):
         """Instantiates the correct schema SubSection (Image, Video, or Point Scan) based on file extension."""
         fname = os.path.basename(str(fname).replace('\\', '/'))
-        if fname.endswith(('.tif', '.pgm')):
+        lower_name = fname.lower()
+        if lower_name.endswith(('.tif', '.pgm')):
             res = RHEEDImageResult()
             res.name = fname
             res.result_type = 'image'
             if fname in all_files:
                 res.images = self._raw_sibling_path(fname)
             return res
-        elif fname.endswith(('.asc', '.csv')) and 'sensor' not in fname.lower():
+        elif lower_name.endswith(('.asc', '.csv')):
             res = RHEEDPointScanResult()
             res.name = fname
             res.result_type = 'scan_point'
             return res
-        elif fname.endswith('.dst'):
+        elif lower_name.endswith('.dst'):
             res = RHEEDVideoResult()
             res.name = fname
             res.result_type = 'video'
