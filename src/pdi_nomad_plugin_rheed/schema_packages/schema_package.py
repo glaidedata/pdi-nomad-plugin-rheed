@@ -30,7 +30,7 @@ from PIL import Image
 
 m_package = SchemaPackage()
 SOURCE_TIMEZONE = ZoneInfo('Europe/Berlin')
-MBE_EXPERIMENT_LAB_ID = 'data.lab_id#pdi_nomad_plugin.mbe.processes.ExperimentMbePDI'
+MBE_EXPERIMENT_SECTION = 'pdi_nomad_plugin.mbe.processes.ExperimentMbePDI'
 IMAGE_PREVIEW_MAX_DIMENSION = 512
 CURRENT_DERIVED_DATA_VERSION = 1
 
@@ -590,10 +590,8 @@ class RHEEDMeasurement(Measurement, EntryData):
                 owner='all',
                 user_id=user_id,
                 query={
-                    'search_quantities': {
-                        'id': MBE_EXPERIMENT_LAB_ID,
-                        'str_value': growth_id,
-                    }
+                    'results.eln.sections:any': [MBE_EXPERIMENT_SECTION],
+                    'results.eln.lab_ids:any': [growth_id],
                 },
             )
         except Exception as error:

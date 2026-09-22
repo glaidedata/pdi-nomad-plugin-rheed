@@ -696,10 +696,10 @@ def test_links_single_mbe_experiment_for_shared_growth_id():
         owner='all',
         user_id='synthetic-user',
         query={
-            'search_quantities': {
-                'id': 'data.lab_id#pdi_nomad_plugin.mbe.processes.ExperimentMbePDI',
-                'str_value': 'synthetic_growth',
-            }
+            'results.eln.sections:any': [
+                'pdi_nomad_plugin.mbe.processes.ExperimentMbePDI'
+            ],
+            'results.eln.lab_ids:any': ['synthetic_growth'],
         },
     )
 
