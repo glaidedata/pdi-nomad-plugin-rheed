@@ -32,6 +32,7 @@ m_package = SchemaPackage()
 SOURCE_TIMEZONE = ZoneInfo('Europe/Berlin')
 MBE_EXPERIMENT_LAB_ID = 'data.lab_id#pdi_nomad_plugin.mbe.processes.ExperimentMbePDI'
 IMAGE_PREVIEW_MAX_DIMENSION = 512
+CURRENT_DERIVED_DATA_VERSION = 1
 
 
 def _search_nomad_entries(owner, user_id, query):
@@ -319,6 +320,10 @@ class RHEEDMeasurement(Measurement, EntryData):
             'prevents repeated fallback loads from overwriting later ELN edits.'
         ),
     )
+    derived_data_version = Quantity(
+        type=int,
+        description='Internal version of parser-derived RHEED data reconciliation.',
+    )
     color_table = Quantity(type=File, a_browser=dict(adaptor='RawFileAdaptor'))
 
     instrument_settings = SubSection(section_def=InstrumentSettings)
@@ -335,10 +340,22 @@ class RHEEDMeasurement(Measurement, EntryData):
                     local_excel_loaded = self._parse_all_data(
                         mainfile_path, mainfile_dir, all_files, logger
                     )
+                    self.derived_data_version = CURRENT_DERIVED_DATA_VERSION
                 except Exception as e:
                     if logger:
                         logger.error(f'Error parsing RHEED metadata CSV: {e}')
-            elif self.rheed_settings_source is None:
+            elif self._needs_derived_data_migration():
+                try:
+                    migration_succeeded = self._migrate_derived_data(
+                        mainfile_path, mainfile_dir, all_files, logger
+                    )
+                    if migration_succeeded:
+                        self.derived_data_version = CURRENT_DERIVED_DATA_VERSION
+                except Exception as error:
+                    if logger:
+                        logger.error(f'Could not migrate RHEED derived data: {error}')
+
+            if self.results and self.rheed_settings_source is None:
                 local_excel_loaded = self._parse_excel_settings(
                     mainfile_dir, all_files, logger, preserve_existing=True
                 )
@@ -364,6 +381,168 @@ class RHEEDMeasurement(Measurement, EntryData):
             if logger:
                 logger.error(f'Could not access RHEED metadata CSV: {error}')
             return None
+
+    def _needs_derived_data_migration(self):
+        """Return whether this archive predates the current derived-data format."""
+        return (self.derived_data_version or 0) < CURRENT_DERIVED_DATA_VERSION
+
+    def _migrate_derived_data(self, mainfile_path, mainfile_dir, all_files, logger):
+        """Parse into a detached section before reconciling parser-owned data."""
+        parsed = RHEEDMeasurement(data_file=self.data_file)
+        parsed._parse_all_data(
+            mainfile_path,
+            mainfile_dir,
+            all_files,
+            logger,
+            parse_excel_settings=False,
+        )
+        return self._reconcile_derived_data(parsed, logger)
+
+    @staticmethod
+    def _normalized_file_basename(value):
+        """Return a comparable basename from a NOMAD raw-file value."""
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else None
+        if not value:
+            return None
+        return str(value).replace('\\', '/').rsplit('/', maxsplit=1)[-1]
+
+    def _result_identity(self, result):
+        """Build a stable result identity without relying on result-list position."""
+        source = None
+        if isinstance(result, RHEEDImageResult):
+            source = result.images
+        elif isinstance(result, RHEEDPointScanResult) and result.point_scans:
+            source = result.point_scans[0].source_file
+        elif isinstance(result, RHEEDVideoResult):
+            source = result.name or result.video_link
+
+        source = self._normalized_file_basename(
+            source
+        ) or self._normalized_file_basename(result.name)
+        return (type(result).__name__, source) if source else None
+
+    def _reconcile_derived_data(self, parsed, logger):  # noqa: PLR0912
+        """Refresh parser-owned fields while preserving populated ELN values."""
+        existing_by_identity = {}
+        for result in self.results:
+            identity = self._result_identity(result)
+            if identity:
+                existing_by_identity.setdefault(identity, []).append(result)
+
+        reconciliation_plan = []
+        for fresh_result in parsed.results:
+            identity = self._result_identity(fresh_result)
+            if not identity:
+                if logger:
+                    logger.warning(
+                        'RHEED derived-data migration found a fresh result without '
+                        'a stable identity; leaving the archive unchanged'
+                    )
+                return False
+
+            matches = existing_by_identity.get(identity, [])
+            if len(matches) == 1:
+                reconciliation_plan.append((matches[0], fresh_result))
+            elif len(matches) > 1:
+                if logger:
+                    logger.warning(
+                        f'Ambiguous legacy RHEED result identity {identity}; '
+                        'leaving the archive unchanged'
+                    )
+                return False
+            else:
+                reconciliation_plan.append((None, fresh_result))
+
+        updates = []
+        new_results = []
+        for existing, fresh_result in reconciliation_plan:
+            if existing is None:
+                new_results.append(fresh_result.m_copy(deep=True))
+                continue
+            updates.append(
+                (
+                    existing,
+                    fresh_result,
+                    [figure.m_copy(deep=True) for figure in fresh_result.figures],
+                    [
+                        point_scan.m_copy(deep=True)
+                        for point_scan in getattr(fresh_result, 'point_scans', [])
+                    ],
+                )
+            )
+
+        for existing, fresh, figures, point_scans in updates:
+            self._refresh_parser_owned_result_data(
+                existing, fresh, figures, point_scans
+            )
+            self._merge_editable_result_data(existing, fresh)
+
+        self.color_table = parsed.color_table
+        self.results.extend(new_results)
+        return True
+
+    def _refresh_parser_owned_result_data(self, existing, fresh, figures, point_scans):
+        """Replace data that is always reconstructed from uploaded raw files."""
+        existing.result_type = fresh.result_type
+        existing.figures = figures
+        if isinstance(existing, RHEEDImageResult) and isinstance(
+            fresh, RHEEDImageResult
+        ):
+            existing.images = fresh.images
+        if isinstance(existing, RHEEDPointScanResult) and isinstance(
+            fresh, RHEEDPointScanResult
+        ):
+            existing.point_scans = point_scans
+
+    def _merge_editable_result_data(self, existing, fresh):
+        """Fill missing editable values and apply narrow, proven legacy corrections."""
+        if existing.sample and fresh.sample:
+            self._correct_legacy_sample_id(existing, fresh)
+        if existing.substrate_holder and fresh.substrate_holder:
+            old_alpha = existing.substrate_holder.rotation_angle_alpha_deg
+            fresh_alpha = fresh.substrate_holder.rotation_angle_alpha_deg
+            if old_alpha in (None, -1) and fresh_alpha is not None:
+                existing.substrate_holder.rotation_angle_alpha_deg = fresh_alpha
+        self._fill_missing_section(existing, fresh)
+
+    def _correct_legacy_sample_id(self, existing, fresh):
+        """Restore the holder suffix only for the known old growth-only form."""
+        if not existing.substrate_holder:
+            return
+        holder_position = existing.substrate_holder.position_measured
+        fresh_sample_id = fresh.sample.sample_id
+        if not holder_position or not fresh_sample_id:
+            return
+        suffix = f'_{holder_position}'
+        if not fresh_sample_id.endswith(suffix):
+            return
+        growth_id = fresh_sample_id[: -len(suffix)]
+        if existing.sample.sample_id == growth_id:
+            existing.sample.sample_id = fresh_sample_id
+
+    def _fill_missing_section(self, existing, fresh):
+        """Recursively fill non-repeating editable subsection values."""
+        for name, quantity in fresh.m_def.all_quantities.items():
+            if not fresh.m_is_set(quantity) or existing.m_is_set(quantity):
+                continue
+            existing.m_set(quantity, deepcopy(fresh.m_get(quantity)))
+
+        for subsection in fresh.m_def.all_sub_sections.values():
+            if subsection.repeats:
+                continue
+            fresh_subsections = fresh.m_get_sub_sections(subsection)
+            if not fresh_subsections:
+                continue
+            existing_subsections = existing.m_get_sub_sections(subsection)
+            if not existing_subsections:
+                existing.m_add_sub_section(
+                    subsection, fresh_subsections[0].m_copy(deep=True)
+                )
+            else:
+                self._fill_missing_section(
+                    existing_subsections[0], fresh_subsections[0]
+                )
 
     @staticmethod
     def _derive_growth_id(sample_id, holder_position):
@@ -452,7 +631,9 @@ class RHEEDMeasurement(Measurement, EntryData):
                     self.measurement_id = f'RHD_{s_id}_{dt_str}'
 
     # --- PARSING LOGIC ---
-    def _parse_all_data(self, mainfile_path, mainfile_dir, all_files, logger):
+    def _parse_all_data(
+        self, mainfile_path, mainfile_dir, all_files, logger, parse_excel_settings=True
+    ):
         """Master controller that orchestrates reading all files and mapping the data."""
         df_meta = self._load_and_prep_csv(mainfile_path)
         df_rot = self._parse_rotation_log(mainfile_dir, logger)
@@ -470,7 +651,11 @@ class RHEEDMeasurement(Measurement, EntryData):
             os.path.basename(mainfile_path),
             logger,
         )
-        return self._parse_excel_settings(mainfile_dir, all_files, logger)
+        return (
+            self._parse_excel_settings(mainfile_dir, all_files, logger)
+            if parse_excel_settings
+            else False
+        )
 
     def _raw_sibling_path(self, filename):
         """Return a sibling's upload-relative raw path without local path leakage."""

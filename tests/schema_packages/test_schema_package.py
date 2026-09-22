@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import numpy as np
+import pytest
 from nomad.datamodel import EntryArchive, EntryMetadata
 from nomad.metainfo import File
 from nomad.utils import get_logger
@@ -13,11 +14,14 @@ from openpyxl import Workbook
 from PIL import Image
 
 from pdi_nomad_plugin_rheed.schema_packages.schema_package import (
+    CURRENT_DERIVED_DATA_VERSION,
     IMAGE_PREVIEW_MAX_DIMENSION,
+    EGunFUG,
     InstrumentSettings,
     PointScan,
     RHEEDImageResult,
     RHEEDMeasurement,
+    RHEEDMeasurementSettings,
     RHEEDPointScanResult,
     RHEEDResult,
     RHEEDSensors,
@@ -280,6 +284,7 @@ def test_schema_extraction_normalization(tmp_path):
     measurement = _normalize_synthetic_measurement(tmp_path)
 
     assert measurement.measurement_id == 'RHD_nova'
+    assert measurement.derived_data_version == CURRENT_DERIVED_DATA_VERSION
     assert len(measurement.results) == 4  # noqa: PLR2004
     results_by_name = {result.name: result for result in measurement.results}
     assert {name: result.result_type for name, result in results_by_name.items()} == {
@@ -561,6 +566,12 @@ def test_raw_file_quantities_use_nomad_file_references(tmp_path):
         'eln'
         not in RHEEDMeasurement.m_def.all_quantities[
             'rheed_settings_source'
+        ].m_annotations
+    )
+    assert (
+        'eln'
+        not in RHEEDMeasurement.m_def.all_quantities[
+            'derived_data_version'
         ].m_annotations
     )
     assert isinstance(RHEEDImageResult.m_def.all_quantities['images'].type, File)
@@ -990,6 +1001,7 @@ def test_reprocessing_late_mbe_link_loads_settings_without_rebuilding_results(tm
         substrate_holder=SubstrateHolder(position_measured='A'),
     )
     measurement.results.append(existing_result)
+    measurement.derived_data_version = CURRENT_DERIVED_DATA_VERSION
     archive.metadata.main_author = 'synthetic-user'
     no_matches = MagicMock(data=[])
 
@@ -1042,6 +1054,7 @@ def test_late_linked_settings_preserve_manual_reference_and_values(tmp_path):
             substrate_holder=SubstrateHolder(position_measured='A'),
         )
     )
+    measurement.derived_data_version = CURRENT_DERIVED_DATA_VERSION
     manual_reference = '../uploads/manual/archive/experiment#data'
     measurement.mbe_experiment_ref = manual_reference
     measurement.instrument_settings = InstrumentSettings(electronics_type='FUG')
@@ -1083,6 +1096,7 @@ def test_failed_linked_settings_fallback_retries_on_later_normalization(tmp_path
             substrate_holder=SubstrateHolder(position_measured='A'),
         )
     )
+    measurement.derived_data_version = CURRENT_DERIVED_DATA_VERSION
     measurement.mbe_experiment_ref = '../uploads/manual/archive/experiment#data'
     failed_experiment = SimpleNamespace(data_file=None)
     experiment, _ = _synthetic_linked_experiment(tmp_path, 63.5)
@@ -1113,6 +1127,7 @@ def test_successful_linked_settings_fallback_does_not_reapply_on_reprocessing(tm
         substrate_holder=SubstrateHolder(position_measured='A'),
     )
     measurement.results.append(existing_result)
+    measurement.derived_data_version = CURRENT_DERIVED_DATA_VERSION
     measurement.mbe_experiment_ref = '../uploads/manual/archive/experiment#data'
     experiment, remote_context = _synthetic_linked_experiment(tmp_path, 63.5)
 
@@ -1148,6 +1163,7 @@ def test_linked_settings_provenance_remains_truthful_when_local_xlsx_appears(
         substrate_holder=SubstrateHolder(position_measured='A'),
     )
     measurement.results.append(existing_result)
+    measurement.derived_data_version = CURRENT_DERIVED_DATA_VERSION
     measurement.mbe_experiment_ref = '../uploads/manual/archive/experiment#data'
     experiment, remote_context = _synthetic_linked_experiment(tmp_path, 63.5)
 
@@ -1188,6 +1204,266 @@ def test_linked_settings_provenance_remains_truthful_when_local_xlsx_appears(
     assert measurement.sample_phi_holder_alpha_deg == 41.5  # noqa: PLR2004
     parse_local_settings.assert_not_called()
     remote_context.raw_file.assert_not_called()
+
+
+def test_migrates_legacy_results_without_overwriting_manual_values(  # noqa: PLR0915
+    tmp_path,
+):
+    measurement, archive = _synthetic_measurement_archive(tmp_path)
+    manual_measurement_id = 'manual-rheed-id'
+    manual_mbe_reference = '../uploads/manual/archive/experiment#data'
+    manual_sample_reference = '../uploads/manual/archive/sample#data'
+    manual_result_sample_reference = '../uploads/manual/archive/result-sample#data'
+    legacy_image = RHEEDImageResult(
+        name='crystal_image.tif',
+        result_type='image',
+        images='/legacy/incorrect/crystal_image.tif',
+        notes='manual image note',
+        sample=Sample(
+            sample_id='nova',
+            sample_reference=manual_result_sample_reference,
+            sample_surface_compound='manual material',
+        ),
+        substrate_holder=SubstrateHolder(position_measured='D'),
+        measurement_settings=RHEEDMeasurementSettings(
+            e_gun_FUG=EGunFUG(electron_energy_keV=99.0)
+        ),
+    )
+    legacy_scan = RHEEDPointScanResult(
+        name='sweep.asc',
+        result_type='scan_point',
+        figures=[],
+        sample=Sample(sample_id='scan'),
+        substrate_holder=SubstrateHolder(position_measured='B'),
+        point_scans=[
+            PointScan(source_file='/legacy/incorrect/sweep.asc', sensors=RHEEDSensors())
+        ],
+    )
+    unmatched_result = RHEEDImageResult(
+        name='manual_retained.tif',
+        result_type='image',
+        images='manual_retained.tif',
+        notes='keep this unmatched manual result',
+    )
+    measurement.results.extend([legacy_image, legacy_scan, unmatched_result])
+    measurement.measurement_id = manual_measurement_id
+    measurement.mbe_experiment_ref = manual_mbe_reference
+    measurement.sample_ref = manual_sample_reference
+    measurement.sample_phi_holder_alpha_deg = 41.5
+    measurement.instrument_settings = InstrumentSettings(electronics_type='FUG')
+    measurement.rheed_settings_source = 'linked_mbe'
+
+    measurement.normalize(archive, get_logger(__name__))
+
+    results = {result.name: result for result in measurement.results}
+    migrated_image = results['crystal_image.tif']
+    migrated_scan = results['sweep.asc']
+    point_scan = migrated_scan.point_scans[0]
+
+    assert measurement.derived_data_version == CURRENT_DERIVED_DATA_VERSION
+    assert measurement.measurement_id == manual_measurement_id
+    assert measurement.m_to_dict()['mbe_experiment_ref'] == manual_mbe_reference
+    assert measurement.m_to_dict()['sample_ref'] == manual_sample_reference
+    assert measurement.sample_phi_holder_alpha_deg == 41.5  # noqa: PLR2004
+    assert measurement.instrument_settings.electronics_type == 'FUG'
+    assert measurement.rheed_settings_source == 'linked_mbe'
+
+    assert migrated_image.images == 'crystal_image.tif'
+    assert migrated_image.notes == 'manual image note'
+    assert migrated_image.sample.sample_id == 'nova_D'
+    assert migrated_image.sample.sample_surface_compound == 'manual material'
+    assert (
+        migrated_image.sample.m_to_dict()['sample_reference']
+        == manual_result_sample_reference
+    )
+    assert (
+        migrated_image.measurement_settings.e_gun_FUG.electron_energy_keV == 99.0  # noqa: PLR2004
+    )
+
+    assert migrated_scan.sample.sample_id == 'scan_B'
+    assert len(migrated_scan.figures) == 2  # noqa: PLR2004
+    assert point_scan.source_file == 'sweep.asc'
+    assert len(point_scan.sensors.sensors) == 2  # noqa: PLR2004
+    assert list(point_scan.sensors.sensors[0].intensity) == [1.5, 3.5]
+    assert point_scan.sensor_definition_file == 'sensors_2042-05-06___07-08-08.000.sn'
+    assert (
+        point_scan.sensor_position_overview_picture.file
+        == 'sensor_overview_2042-05-06___07-08-09.750.tif'
+    )
+    assert len(point_scan.sensors.figures) == 1
+    assert len(point_scan.sensor_position_overview_picture.figures) == 1
+
+    assert results['manual_retained.tif'] is unmatched_result
+    assert 'orbit_capture.dst' in results
+    assert 'sensor_overview_2042-05-06___07-08-09.750.tif' in results
+    assert measurement.color_table == 'color_scale.col'
+
+    result_count = len(measurement.results)
+    figure_count = len(migrated_scan.figures)
+    sensor_count = len(point_scan.sensors.sensors)
+    measurement.normalize(archive, get_logger(__name__))
+
+    assert len(measurement.results) == result_count
+    assert len(results['sweep.asc'].figures) == figure_count
+    assert len(results['sweep.asc'].point_scans) == 1
+    assert len(results['sweep.asc'].point_scans[0].sensors.sensors) == sensor_count
+
+
+@pytest.mark.parametrize(
+    ('legacy_alpha', 'expected_alpha'),
+    [(None, 17.25), (-1, 17.25), (0, 0), (31.5, 31.5)],
+)
+def test_migration_applies_only_targeted_rotation_corrections(
+    tmp_path, legacy_alpha, expected_alpha
+):
+    measurement, archive = _synthetic_measurement_archive(tmp_path)
+    measurement.results.append(
+        RHEEDVideoResult(
+            name='orbit_capture.dst',
+            result_type='video',
+            sample=Sample(sample_id='nova_C'),
+            substrate_holder=SubstrateHolder(
+                position_measured='C', rotation_angle_alpha_deg=legacy_alpha
+            ),
+        )
+    )
+    measurement.rheed_settings_source = 'linked_mbe'
+
+    measurement.normalize(archive, get_logger(__name__))
+
+    video = next(
+        result for result in measurement.results if result.name == 'orbit_capture.dst'
+    )
+    assert video.substrate_holder.rotation_angle_alpha_deg == expected_alpha
+    assert measurement.derived_data_version == CURRENT_DERIVED_DATA_VERSION
+
+
+def test_migration_preserves_arbitrary_different_sample_id(tmp_path):
+    measurement, archive = _synthetic_measurement_archive(tmp_path)
+    measurement.results.append(
+        RHEEDImageResult(
+            name='crystal_image.tif',
+            result_type='image',
+            images='/legacy/crystal_image.tif',
+            sample=Sample(sample_id='manual_unrelated_id'),
+            substrate_holder=SubstrateHolder(position_measured='D'),
+        )
+    )
+    measurement.rheed_settings_source = 'linked_mbe'
+
+    measurement.normalize(archive, get_logger(__name__))
+
+    image = next(
+        result for result in measurement.results if result.name == 'crystal_image.tif'
+    )
+    assert image.sample.sample_id == 'manual_unrelated_id'
+
+
+def test_migration_backfills_completely_missing_point_scan_once(tmp_path):
+    measurement, archive = _synthetic_measurement_archive(tmp_path)
+    measurement.results.append(
+        RHEEDImageResult(
+            name='crystal_image.tif',
+            result_type='image',
+            images='legacy/crystal_image.tif',
+        )
+    )
+    measurement.rheed_settings_source = 'linked_mbe'
+
+    measurement.normalize(archive, get_logger(__name__))
+
+    scan_results = [
+        result for result in measurement.results if result.name == 'sweep.asc'
+    ]
+    assert len(scan_results) == 1
+    scan_result = scan_results[0]
+    point_scan = scan_result.point_scans[0]
+    assert scan_result.result_type == 'scan_point'
+    assert len(scan_result.point_scans) == 1
+    assert point_scan.source_file == 'sweep.asc'
+    assert point_scan.start_time is not None
+    assert point_scan.end_time is not None
+    assert len(point_scan.sensors.sensors) == 2  # noqa: PLR2004
+    assert list(point_scan.sensors.sensors[0].intensity) == [1.5, 3.5]
+    assert point_scan.sensor_definition_file == 'sensors_2042-05-06___07-08-08.000.sn'
+    assert (
+        point_scan.sensor_position_overview_picture.file
+        == 'sensor_overview_2042-05-06___07-08-09.750.tif'
+    )
+    assert len(point_scan.sensors.figures) == 1
+    assert len(point_scan.sensor_position_overview_picture.figures) == 1
+    assert len(scan_result.figures) == 2  # noqa: PLR2004
+
+    sensor_count = len(point_scan.sensors.sensors)
+    figure_count = len(scan_result.figures)
+    measurement.normalize(archive, get_logger(__name__))
+
+    scan_results = [
+        result for result in measurement.results if result.name == 'sweep.asc'
+    ]
+    assert len(scan_results) == 1
+    assert len(scan_results[0].point_scans) == 1
+    assert len(scan_results[0].point_scans[0].sensors.sensors) == sensor_count
+    assert len(scan_results[0].figures) == figure_count
+
+
+def test_ambiguous_migration_leaves_all_legacy_data_unchanged(tmp_path):
+    measurement, archive = _synthetic_measurement_archive(tmp_path)
+    first = RHEEDImageResult(
+        name='crystal_image.tif',
+        result_type='image',
+        images='legacy-one/crystal_image.tif',
+    )
+    second = RHEEDImageResult(
+        name='crystal_image.tif',
+        result_type='image',
+        images='legacy-two/crystal_image.tif',
+    )
+    video = RHEEDVideoResult(name='orbit_capture.dst', result_type='image')
+    measurement.results.extend([first, second, video])
+    measurement.color_table = 'legacy-color.col'
+    measurement.rheed_settings_source = 'linked_mbe'
+    logger = MagicMock()
+
+    measurement.normalize(archive, logger)
+
+    assert measurement.results == [first, second, video]
+    assert first.images == 'legacy-one/crystal_image.tif'
+    assert second.images == 'legacy-two/crystal_image.tif'
+    assert video.result_type == 'image'
+    assert measurement.color_table == 'legacy-color.col'
+    assert measurement.derived_data_version is None
+    assert any(
+        'Ambiguous legacy RHEED result identity' in call.args[0]
+        for call in logger.warning.call_args_list
+    )
+
+
+def test_failed_derived_data_migration_preserves_legacy_archive(tmp_path):
+    measurement, archive = _synthetic_measurement_archive(tmp_path)
+    legacy_result = RHEEDImageResult(
+        name='crystal_image.tif',
+        result_type='image',
+        images='legacy/crystal_image.tif',
+    )
+    measurement.results.append(legacy_result)
+    measurement.rheed_settings_source = 'linked_mbe'
+    logger = MagicMock()
+
+    with patch.object(
+        RHEEDMeasurement,
+        '_parse_all_data',
+        side_effect=ValueError('synthetic migration parse failure'),
+    ):
+        measurement.normalize(archive, logger)
+
+    assert measurement.results == [legacy_result]
+    assert measurement.derived_data_version is None
+    assert legacy_result.images == 'legacy/crystal_image.tif'
+    assert any(
+        'Could not migrate RHEED derived data' in call.args[0]
+        for call in logger.error.call_args_list
+    )
 
 
 def test_parses_rotation_log_and_assigns_automatic_result(tmp_path):
