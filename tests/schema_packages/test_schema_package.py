@@ -284,6 +284,7 @@ def test_schema_extraction_normalization(tmp_path):
     measurement = _normalize_synthetic_measurement(tmp_path)
 
     assert measurement.measurement_id == 'RHD_nova'
+    assert measurement.lab_id == measurement.measurement_id
     assert measurement.derived_data_version == CURRENT_DERIVED_DATA_VERSION
     assert len(measurement.results) == 4  # noqa: PLR2004
     results_by_name = {result.name: result for result in measurement.results}
@@ -328,6 +329,42 @@ def test_schema_extraction_normalization(tmp_path):
     assert len(point_scan.sensor_position_overview_picture.figures) == 1
     assert len(scan.figures) == 2  # noqa: PLR2004
     assert measurement.color_table == 'color_scale.col'
+
+
+def test_measurement_lab_id_is_fill_only_and_indexed(tmp_path):
+    measurement, archive = _synthetic_measurement_archive(tmp_path)
+    measurement.normalize(archive, get_logger(__name__))
+
+    assert measurement.measurement_id == 'RHD_nova'
+    assert measurement.lab_id == measurement.measurement_id
+    assert archive.results.eln.lab_ids == [measurement.lab_id]
+
+    measurement.normalize(archive, get_logger(__name__))
+
+    assert measurement.lab_id == 'RHD_nova'
+    assert archive.results.eln.lab_ids == ['RHD_nova']
+
+    legacy_archive = EntryArchive(
+        metadata=EntryMetadata(entry_name='legacy-rheed-entry')
+    )
+    legacy_measurement = RHEEDMeasurement(measurement_id='RHD_legacy')
+    legacy_archive.data = legacy_measurement
+    legacy_measurement.normalize(legacy_archive, get_logger(__name__))
+
+    assert legacy_measurement.lab_id == 'RHD_legacy'
+    assert legacy_archive.results.eln.lab_ids == ['RHD_legacy']
+
+    manual_archive = EntryArchive(
+        metadata=EntryMetadata(entry_name='manual-rheed-entry')
+    )
+    manual_measurement = RHEEDMeasurement(
+        measurement_id='RHD_generated', lab_id='manual-standard-id'
+    )
+    manual_archive.data = manual_measurement
+    manual_measurement.normalize(manual_archive, get_logger(__name__))
+
+    assert manual_measurement.lab_id == 'manual-standard-id'
+    assert manual_archive.results.eln.lab_ids == ['manual-standard-id']
 
 
 def test_point_scan_plot_combines_all_sensor_intensities_and_overview(tmp_path):

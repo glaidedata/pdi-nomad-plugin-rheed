@@ -361,6 +361,8 @@ class RHEEDMeasurement(Measurement, EntryData):
                 )
 
         self._autogenerate_measurement_id()
+        if self.lab_id is None and self.measurement_id:
+            self.lab_id = self.measurement_id
         self._link_mbe_experiment(archive, logger)
         if not local_excel_loaded and self.rheed_settings_source != 'linked_mbe':
             self._parse_linked_mbe_excel_settings(logger)
