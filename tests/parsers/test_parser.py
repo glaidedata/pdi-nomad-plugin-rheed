@@ -13,9 +13,9 @@ def test_parser_creates_pointer(tmp_path):
     2. Routes the target file name to the ELN payload.
     """
     # 1. Create a temporary dummy CSV file for the parser to trigger on
-    test_file = tmp_path / 'm84266_A_RHEED_meta_final.csv'
+    test_file = tmp_path / 'nova_C_RHEED_meta_synthetic.csv'
     test_file.write_text(
-        'm8_id,date,time,file_name\nm84266_A,2026-03-13,16:33:40,dummy.tif\n'
+        'm8_id,date,time,file_name\nnova_C,2042-05-06,07-08-09.123,synthetic.tif\n'
     )
 
     parser = RheedParser()
